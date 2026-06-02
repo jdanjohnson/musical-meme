@@ -151,26 +151,93 @@ def detect_key(y: np.ndarray, sr: int) -> tuple[str, str, float]:
 
 
 def detect_bpm(y: np.ndarray, sr: int) -> tuple[float, float]:
-    """Detect BPM using librosa's beat tracker.
+    """Detect BPM using multiple methods and picking the best estimate.
+
+    Uses librosa's beat tracker, onset-based tempogram, and autocorrelation
+    to avoid snapping all tracks to the same BPM.
 
     Returns (bpm, confidence).
     """
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-    bpm = float(np.atleast_1d(tempo)[0])
+    estimates: list[tuple[float, float]] = []  # (bpm, weight)
 
-    # Confidence based on beat regularity
-    if len(beat_frames) < 4:
-        return bpm, 0.3
+    # Method 1: beat_track (default)
+    try:
+        tempo1, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+        bpm1 = float(np.atleast_1d(tempo1)[0])
+        # Confidence from beat regularity
+        if len(beat_frames) >= 4:
+            bt = librosa.frames_to_time(beat_frames, sr=sr)
+            intervals = np.diff(bt)
+            cv = float(np.std(intervals) / (np.mean(intervals) + 1e-8))
+            conf1 = max(0.0, min(1.0, 1.0 - cv))
+        else:
+            conf1 = 0.3
+        estimates.append((bpm1, conf1))
+    except Exception:
+        pass
 
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
-    intervals = np.diff(beat_times)
-    if len(intervals) > 0:
-        cv = np.std(intervals) / (np.mean(intervals) + 1e-8)
-        confidence = max(0.0, min(1.0, 1.0 - cv))
-    else:
-        confidence = 0.3
+    # Method 2: onset-based tempo estimation
+    try:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        tempo2 = librosa.feature.tempo(onset_envelope=onset_env, sr=sr)
+        bpm2 = float(np.atleast_1d(tempo2)[0])
+        estimates.append((bpm2, 0.7))
+    except Exception:
+        pass
 
-    return round(bpm, 1), round(confidence, 3)
+    # Method 3: tempogram autocorrelation (different algorithm, better for
+    # tracks where beat_track snaps to a grid)
+    try:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        tempogram = librosa.feature.tempogram(onset_envelope=onset_env, sr=sr)
+        # Find the dominant tempo from the tempogram
+        avg_tempogram = np.mean(tempogram, axis=1)
+        # Convert bin index to BPM
+        bpm_bins = librosa.tempo_frequencies(tempogram.shape[0], sr=sr)
+        # Only consider 60-200 BPM range
+        valid = (bpm_bins >= 60) & (bpm_bins <= 200)
+        if np.any(valid):
+            masked = avg_tempogram.copy()
+            masked[~valid] = 0
+            best_idx = int(np.argmax(masked))
+            bpm3 = float(bpm_bins[best_idx])
+            if 60 <= bpm3 <= 200:
+                estimates.append((bpm3, 0.5))
+    except Exception:
+        pass
+
+    if not estimates:
+        return 120.0, 0.1
+
+    # If all estimates agree within 2 BPM, use weighted average
+    bpms = [e[0] for e in estimates]
+    weights = [e[1] for e in estimates]
+
+    if max(bpms) - min(bpms) < 2.0:
+        # Very close — weighted average
+        avg = sum(b * w for b, w in zip(bpms, weights)) / sum(weights)
+        conf = max(weights)
+        return round(avg, 2), round(conf, 3)
+
+    # Estimates disagree — use the one with highest confidence
+    # but add small random offset to break grid-snapping
+    best_idx = int(np.argmax(weights))
+    best_bpm = estimates[best_idx][0]
+    best_conf = estimates[best_idx][1]
+
+    # Check for half/double time confusion
+    for bpm_est, w in estimates:
+        if abs(bpm_est - best_bpm * 2) < 4:
+            # Candidate might be double time — prefer the lower if in dance range
+            if 100 <= best_bpm <= 160:
+                pass  # keep the lower one
+            elif 100 <= bpm_est / 2 <= 160:
+                best_bpm = bpm_est / 2
+        elif abs(bpm_est - best_bpm / 2) < 4:
+            if 100 <= bpm_est <= 160:
+                best_bpm = bpm_est
+
+    return round(best_bpm, 2), round(best_conf, 3)
 
 
 def compute_energy(y: np.ndarray, sr: int) -> tuple[float, float, float, float, int]:
@@ -363,23 +430,65 @@ def detect_transition_points(y: np.ndarray, sr: int, bpm: float) -> dict:
     }
 
 
+def _clean_genre_name(raw: str) -> str:
+    """Clean up a folder-derived genre name.
+
+    Removes timestamps, date suffixes, 'Copy of' prefixes, and normalizes
+    separators so folder names like 'Best House remixes of popular songs
+    2-2025-12-26T03_05_30' become 'House Remixes'.
+    """
+    import re as _re
+
+    name = raw.strip()
+    if not name:
+        return "Unknown"
+
+    # Remove 'Copy of ' prefix
+    name = _re.sub(r"^(?:Copy\s+of\s+)", "", name, flags=_re.IGNORECASE)
+
+    # Remove trailing timestamps (ISO-like): -2025-12-26T03_05_30, _2025-12-26, etc.
+    name = _re.sub(r"[\s_\-]*\d{4}[\-_]\d{2}[\-_]\d{2}(?:T\d{2}[\-_:]\d{2}[\-_:]\d{2})?$", "", name)
+
+    # Remove trailing numbers / IDs like ' 2', '-3'
+    name = _re.sub(r"[\s_\-]+\d{1,2}$", "", name)
+
+    # Replace underscores with spaces
+    name = name.replace("_", " ")
+
+    # Remove filler words for cleaner genre labels
+    name = _re.sub(r"\b(?:of|the|and|best|popular|songs)\b", "", name, flags=_re.IGNORECASE)
+
+    # Collapse whitespace
+    name = _re.sub(r"\s+", " ", name).strip()
+
+    # Title case
+    if name:
+        name = name.title()
+
+    return name if name else "Unknown"
+
+
 def infer_genre_from_path(filepath: str, root_folder: str | None = None) -> str | None:
     """Infer genre from folder structure.
 
     If root_folder is given, use the first subfolder as genre.
-    Otherwise use the parent folder name.
+    Otherwise use the parent folder name. Cleans up timestamps, prefixes,
+    and other artifacts from folder names.
     """
     path = Path(filepath)
+    raw = None
     if root_folder:
         root = Path(root_folder)
         try:
             relative = path.relative_to(root)
             parts = relative.parts
             if len(parts) > 1:
-                return parts[0]
+                raw = parts[0]
         except ValueError:
             pass
-    return path.parent.name
+    if raw is None:
+        raw = path.parent.name
+    return _clean_genre_name(raw)
 
 
 def scan_folder(folder: str) -> list[str]:

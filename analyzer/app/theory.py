@@ -157,9 +157,12 @@ def energy_arc_fit(
 ) -> tuple[float, str]:
     """Score how well a candidate track's energy fits the arc at this position.
 
+    Uses continuous scoring (not just buckets) so that a track at exactly the
+    target energy scores higher than one that's 0.9 levels away. Also penalizes
+    staying at the same energy for too long and rewards movement toward the target.
+
     Returns (score, explanation).
     """
-    # Define target energy at each position (standard arc)
     arcs = {
         "standard": _standard_arc,
         "warmup_peak": _warmup_peak_arc,
@@ -177,26 +180,37 @@ def energy_arc_fit(
     delta = abs(candidate_energy - target)
     direction = candidate_energy - current_energy
 
-    if delta <= 1:
-        score = 1.0
-        explanation = f"Energy {candidate_energy} fits arc target {target:.0f} perfectly"
-    elif delta <= 2:
-        score = 0.8
-        explanation = f"Energy {candidate_energy} close to arc target {target:.0f}"
-    elif delta <= 3:
-        score = 0.6
+    # Continuous scoring: exponential decay from target
+    # delta 0 → 1.0, delta 1 → 0.85, delta 2 → 0.65, delta 3 → 0.45, delta 4+ → low
+    score = max(0.05, 1.0 * (0.85 ** delta))
+
+    if delta < 0.5:
+        explanation = f"Energy {candidate_energy} hits arc target {target:.0f}"
+    elif delta <= 1.5:
+        explanation = f"Energy {candidate_energy} near arc target {target:.0f}"
+    elif delta <= 2.5:
         explanation = f"Energy {candidate_energy} slightly off arc target {target:.0f}"
     else:
-        score = max(0.1, 0.5 - delta * 0.08)
         explanation = f"Energy {candidate_energy} far from arc target {target:.0f}"
 
-    # Bonus for matching expected direction
-    if position_in_set < 0.6 and direction > 0:
-        score = min(1.0, score + 0.1)
+    # Penalize staying flat — if current and candidate are the same energy,
+    # reduce score slightly to encourage movement
+    if abs(direction) == 0 and arc_type != "flat":
+        score *= 0.85
+        explanation += " (flat — no energy movement)"
+
+    # Bonus for moving toward target direction
+    target_direction = target - current_energy
+    if target_direction > 0.5 and direction > 0:
+        score = min(1.0, score * 1.15)
         explanation += " (building energy — good)"
-    elif position_in_set > 0.85 and direction < 0:
-        score = min(1.0, score + 0.1)
+    elif target_direction < -0.5 and direction < 0:
+        score = min(1.0, score * 1.15)
         explanation += " (winding down — good)"
+    elif abs(target_direction) > 1.5 and direction * target_direction < 0:
+        # Moving away from where the arc wants to go
+        score *= 0.75
+        explanation += " (wrong direction for arc)"
 
     return round(score, 2), explanation
 
@@ -653,7 +667,8 @@ def auto_generate_set(
     """Auto-generate a full DJ set.
 
     Returns list of (track, transition_score_from_previous).
-    First track has None score.
+    First track has None score. Uses key-diversity penalty so the set doesn't
+    stay in the same key for too many tracks in a row.
     """
     pool = deduplicate_tracks(all_tracks)
     if genre_filter:
@@ -675,19 +690,59 @@ def auto_generate_set(
     used_ids = {current["id"]}
     total_duration = current.get("duration", 300) / 60  # minutes
 
+    # Track consecutive same-key count for diversity penalty
+    consecutive_same_key = 0
+    recent_keys: list[str] = [current.get("camelot", "")]
+
     while total_duration < target_minutes and len(used_ids) < len(pool):
         position = min(1.0, total_duration / target_minutes)
         suggestions = suggest_next_tracks(
-            current, pool, position, arc_type, bpm_range, used_ids, limit=5
+            current, pool, position, arc_type, bpm_range, used_ids, limit=15
         )
 
         if not suggestions:
             break
 
-        next_track, score = suggestions[0]
+        # Apply key diversity penalty: after 3+ tracks in the same key,
+        # boost tracks that move to a different (but compatible) key
+        best_track = None
+        best_score = None
+        cur_key = current.get("camelot", "")
+
+        for track, score in suggestions:
+            adjusted_overall = score.overall_score
+            track_key = track.get("camelot", "")
+
+            if track_key == cur_key:
+                # Penalize staying in same key after 2+ consecutive tracks
+                if consecutive_same_key >= 2:
+                    penalty = 0.08 * (consecutive_same_key - 1)
+                    adjusted_overall -= min(0.25, penalty)
+            else:
+                # Reward compatible key change after staying in same key
+                if consecutive_same_key >= 2 and score.harmonic_score >= 0.7:
+                    adjusted_overall += 0.05
+
+            if best_score is None or adjusted_overall > best_score:
+                best_score = adjusted_overall
+                best_track = (track, score)
+
+        if best_track is None:
+            break
+
+        next_track, score = best_track
         result.append((next_track, score))
         used_ids.add(next_track["id"])
         total_duration += next_track.get("duration", 300) / 60
+
+        # Update key tracking
+        next_key = next_track.get("camelot", "")
+        if next_key == cur_key:
+            consecutive_same_key += 1
+        else:
+            consecutive_same_key = 0
+        recent_keys.append(next_key)
+
         current = next_track
 
     return result

@@ -37,6 +37,7 @@ export interface Track {
   format: string;
   sample_rate: number;
   channels: number;
+  soundcloud_url: string | null;
 }
 
 export interface TransitionScore {
@@ -181,4 +182,31 @@ export const api = {
 
   scImports: () =>
     fetcher<{ imports: SCImportStatus[] }>("/api/soundcloud/imports"),
+
+  // Export
+  exportSet: (params: {
+    soundcloud_only?: boolean;
+    genre_filter?: string;
+    start_track_id?: number;
+    target_minutes?: number;
+    arc_type?: string;
+    bpm_range?: number;
+  }) =>
+    fetcher<{
+      set: Array<{
+        position: number;
+        title: string;
+        artist: string;
+        bpm: number;
+        key: string;
+        energy: number;
+        genre: string;
+        soundcloud_url: string;
+        transition: string;
+        tags?: string[];
+      }>;
+      total_tracks: number;
+      total_duration_minutes: number;
+      arc_type: string;
+    }>("/api/export-set", { method: "POST", body: JSON.stringify(params) }),
 };

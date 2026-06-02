@@ -58,6 +58,10 @@ async def init_db() -> None:
                 analyzed_at TEXT NOT NULL,
                 file_modified_at TEXT NOT NULL,
 
+                -- soundcloud
+                soundcloud_url TEXT,
+                soundcloud_tags TEXT,  -- JSON array
+
                 -- user overrides
                 user_bpm REAL,
                 user_key TEXT,
@@ -123,6 +127,14 @@ async def init_db() -> None:
                 error_message TEXT
             );
         """)
+        # Migrations — add columns if missing
+        try:
+            await db.execute("SELECT soundcloud_url FROM tracks LIMIT 1")
+        except Exception:
+            await db.execute("ALTER TABLE tracks ADD COLUMN soundcloud_url TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN soundcloud_tags TEXT")
+            await db.commit()
+
         await db.commit()
     finally:
         await db.close()

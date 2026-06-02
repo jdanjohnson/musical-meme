@@ -1,6 +1,7 @@
 """FastAPI backend — serves library data and runs analysis jobs."""
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ from app.soundcloud import (
     get_apify_token,
     scrape_soundcloud_url,
     scrape_artist_tracks,
-    download_stream,
+    download_track_ytdlp,
     sc_track_hash,
     parse_sc_track,
 )
@@ -503,7 +504,89 @@ async def list_arc_types():
                 "name": "Flat / Chill",
                 "description": "Consistent medium energy throughout",
             },
+            {
+                "id": "pride_night",
+                "name": "🌈 Pride Night (4hr)",
+                "description": "9pm groovy warmup → 10pm build → 11pm peak dance floor → 12am euphoric close",
+            },
+            {
+                "id": "sexy_groovy",
+                "name": "Sexy & Groovy",
+                "description": "Consistent groove, late peak — keeps it sexy all night",
+            },
+            {
+                "id": "long_build",
+                "name": "Long Build (3-5hr)",
+                "description": "Very gradual build for marathon sets — slow burn to euphoria",
+            },
         ]
+    }
+
+
+# --- Export endpoint ---
+
+
+@app.post("/api/export-set")
+async def export_set(params: dict[str, Any]):
+    """Generate a set and return it with SoundCloud URLs for easy finding.
+
+    Same params as generate-set but returns SC links for each track.
+    """
+    db = await get_db()
+    try:
+        tracks = await get_all_tracks(db)
+    finally:
+        await db.close()
+
+    if not tracks:
+        raise HTTPException(status_code=400, detail="No tracks in library")
+
+    # Filter to SC tracks if requested
+    sc_only = params.get("soundcloud_only", False)
+    if sc_only:
+        tracks = [t for t in tracks if t.get("soundcloud_url")]
+
+    genre_filter = params.get("genre_filter")
+    if genre_filter:
+        tracks = [t for t in tracks if t.get("genre", "").lower() == genre_filter.lower()]
+
+    if not tracks:
+        raise HTTPException(status_code=400, detail="No matching tracks found")
+
+    start_id = params.get("start_track_id")
+    target = params.get("target_minutes", 60)
+    arc = params.get("arc_type", "standard")
+    bpm_range = params.get("bpm_range", 8)
+
+    set_tracks = auto_generate_set(tracks, start_id, target, arc, bpm_range)
+
+    result = []
+    for st in set_tracks:
+        entry = {
+            "position": st["position"],
+            "title": st["track"]["title"],
+            "artist": st["track"]["artist"],
+            "bpm": st["track"]["bpm"],
+            "key": st["track"]["camelot"],
+            "energy": st["track"]["energy_level"],
+            "genre": st["track"].get("genre", ""),
+            "soundcloud_url": st["track"].get("soundcloud_url", ""),
+            "transition": st.get("transition_notes", ""),
+        }
+        if st["track"].get("soundcloud_tags"):
+            try:
+                entry["tags"] = json.loads(st["track"]["soundcloud_tags"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        result.append(entry)
+
+    return {
+        "set": result,
+        "total_tracks": len(result),
+        "total_duration_minutes": sum(
+            (st["track"].get("duration") or 0) / 60 for st in set_tracks
+        ),
+        "arc_type": arc,
     }
 
 
@@ -521,8 +604,9 @@ async def soundcloud_connect(req: SCConnectRequest):
     try:
         from apify_client import ApifyClient
         client = ApifyClient(req.apify_token)
-        user = client.user().get()
-        return {"status": "connected", "message": f"Connected as {user.get('username', 'unknown')}"}
+        user_info = client.user().get()
+        username = getattr(user_info, "username", None) or (user_info.get("username") if isinstance(user_info, dict) else "unknown")
+        return {"status": "connected", "message": f"Connected as {username}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -536,8 +620,9 @@ async def soundcloud_status():
     try:
         from apify_client import ApifyClient
         client = ApifyClient(token)
-        user = client.user().get()
-        return {"connected": True, "username": user.get("username", "")}
+        user_info = client.user().get()
+        username = getattr(user_info, "username", None) or (user_info.get("username") if isinstance(user_info, dict) else "")
+        return {"connected": True, "username": username}
     except Exception:
         return {"connected": False, "error": "Invalid Apify token"}
 
@@ -553,14 +638,16 @@ async def soundcloud_import(req: SCImportRequest, background_tasks: BackgroundTa
     if not token:
         raise HTTPException(status_code=400, detail="Apify not connected. Call /api/soundcloud/connect first.")
 
-    label = req.soundcloud_url
+    # Normalize mobile URLs to desktop
+    sc_url = req.soundcloud_url.replace("https://m.soundcloud.com", "https://soundcloud.com")
+    label = sc_url
 
     # Create import job
     db = await get_db()
     try:
         cursor = await db.execute(
             "INSERT INTO soundcloud_imports (playlist_url, playlist_title, status, started_at) VALUES (?, ?, ?, ?)",
-            (req.soundcloud_url, label, "scraping", datetime.now(timezone.utc).isoformat()),
+            (sc_url, label, "scraping", datetime.now(timezone.utc).isoformat()),
         )
         import_id = cursor.lastrowid
         await db.commit()
@@ -577,7 +664,7 @@ async def soundcloud_import(req: SCImportRequest, background_tasks: BackgroundTa
         "current_track": None,
     }
 
-    background_tasks.add_task(run_sc_import, import_id, req.soundcloud_url, req.max_items)
+    background_tasks.add_task(run_sc_import, import_id, sc_url, req.max_items)
 
     return SCImportStatus(
         import_id=import_id,
@@ -691,9 +778,10 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
             job["current_track"] = meta.get("title", f"Track {track_id}")
 
             try:
-                # Download stream
-                local_path = await download_stream(
-                    meta["stream_url"], track_id, meta.get("title", "")
+                # Download via yt-dlp using the track's SC URL
+                track_url = meta.get("url", "")
+                local_path = await loop.run_in_executor(
+                    None, download_track_ytdlp, track_url, track_id, meta.get("title", "")
                 )
                 if not local_path:
                     job["skipped_tracks"] += 1
@@ -709,10 +797,12 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
                 track_data["file_hash"] = expected_hash
                 track_data["title"] = meta.get("title") or track_data.get("title")
                 track_data["artist"] = meta.get("artist") or track_data.get("artist")
-                if meta.get("genre"):
-                    track_data["genre"] = meta["genre"]
+                track_data["genre"] = meta.get("genre") or track_data.get("genre") or "SoundCloud"
                 track_data["folder"] = "SoundCloud"
                 track_data["filename"] = f"{meta.get('title', f'sc_{track_id}')}.mp3"
+                track_data["soundcloud_url"] = meta.get("url", "")
+                if meta.get("tags"):
+                    track_data["soundcloud_tags"] = json.dumps(meta["tags"])
 
                 db = await get_db()
                 try:

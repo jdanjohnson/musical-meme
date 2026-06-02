@@ -163,6 +163,9 @@ def energy_arc_fit(
         "peak_sustain": _peak_sustain_arc,
         "journey": _journey_arc,
         "flat": lambda p: 5,
+        "pride_night": _pride_night_arc,
+        "sexy_groovy": _sexy_groovy_arc,
+        "long_build": _long_build_arc,
     }
 
     arc_fn = arcs.get(arc_type, _standard_arc)
@@ -234,6 +237,58 @@ def _journey_arc(position: float) -> float:
     # Envelope: start low, end medium
     envelope = 0.5 + 0.5 * math.sin(position * math.pi)
     return max(2, min(10, base * envelope + 2))
+
+
+def _pride_night_arc(position: float) -> float:
+    """4-hour pride night: groovy warmup → steady build → euphoric peak → powerful close.
+
+    9-10pm (0.0-0.25): Sexy, groovy warmup — energy 3-5
+    10-11pm (0.25-0.5): Building the vibe — energy 5-7
+    11-12am (0.5-0.75): Peak dance floor — energy 7-9
+    12-1am (0.75-1.0): Euphoric close — energy 8-10
+    """
+    if position < 0.25:
+        return 3 + position / 0.25 * 2              # 3→5
+    elif position < 0.5:
+        return 5 + (position - 0.25) / 0.25 * 2      # 5→7
+    elif position < 0.75:
+        return 7 + (position - 0.5) / 0.25 * 2       # 7→9
+    else:
+        return 9 + (position - 0.75) / 0.25 * 1      # 9→10
+
+
+def _sexy_groovy_arc(position: float) -> float:
+    """Consistent groove with late peak — keeps it sexy all night."""
+    if position < 0.3:
+        return 4 + position / 0.3 * 2                 # 4→6
+    elif position < 0.7:
+        return 6 + (position - 0.3) / 0.4 * 1.5       # 6→7.5
+    elif position < 0.9:
+        return 7.5 + (position - 0.7) / 0.2 * 2.5     # 7.5→10
+    else:
+        return 10 - (position - 0.9) / 0.1 * 2        # 10→8
+
+
+def _long_build_arc(position: float) -> float:
+    """Very gradual build for long sets (3-5 hours)."""
+    if position < 0.7:
+        return 3 + position / 0.7 * 5                  # 3→8
+    elif position < 0.9:
+        return 8 + (position - 0.7) / 0.2 * 2          # 8→10
+    else:
+        return 10 - (position - 0.9) / 0.1 * 3         # 10→7
+
+
+def _custom_time_block_arc(position: float, blocks: list[dict]) -> float:
+    """Build energy from custom time blocks.
+
+    blocks: [{"start": 0.0, "end": 0.25, "energy_start": 3, "energy_end": 5}, ...]
+    """
+    for block in blocks:
+        if block["start"] <= position < block["end"]:
+            t = (position - block["start"]) / (block["end"] - block["start"])
+            return block["energy_start"] + t * (block["energy_end"] - block["energy_start"])
+    return blocks[-1]["energy_end"] if blocks else 5
 
 
 def score_transition(

@@ -6,7 +6,6 @@ import os
 import re
 from pathlib import Path
 
-import httpx
 from apify_client import ApifyClient
 
 logger = logging.getLogger(__name__)
@@ -49,9 +48,10 @@ def scrape_soundcloud_url(urls: list[str], max_items: int = 500) -> list[dict]:
     logger.info("Starting Apify run for %d URLs (max %d items)", len(urls), max_items)
     run = client.actor(APIFY_ACTOR).call(run_input=run_input)
 
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    dataset_id = run.default_dataset_id
+    items = list(client.dataset(dataset_id).iterate_items())
     # Filter to only tracks (not users/playlists metadata)
-    tracks = [item for item in items if item.get("recordType") == "track" or item.get("trackId")]
+    tracks = [item for item in items if item.get("recordType") == "track"]
     logger.info("Apify returned %d items, %d tracks", len(items), len(tracks))
     return tracks
 
@@ -67,14 +67,17 @@ def scrape_artist_tracks(artist_url: str, max_items: int = 500) -> list[dict]:
     logger.info("Fetching artist tracks: %s", artist_url)
     run = client.actor(APIFY_ACTOR).call(run_input=run_input)
 
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    dataset_id = run.default_dataset_id
+    items = list(client.dataset(dataset_id).iterate_items())
     tracks = [item for item in items if item.get("trackId")]
     logger.info("Artist tracks: %d items, %d tracks", len(items), len(tracks))
     return tracks
 
 
-async def download_stream(stream_url: str, track_id: str, title: str = "track") -> str | None:
-    """Download a track's stream URL to local cache. Returns local file path or None."""
+def download_track_ytdlp(sc_url: str, track_id: str, title: str = "track") -> str | None:
+    """Download a SoundCloud track via yt-dlp. Returns local file path or None."""
+    import subprocess
+
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(track_id))
@@ -83,28 +86,48 @@ async def download_stream(stream_url: str, track_id: str, title: str = "track") 
         logger.info("SC track %s already cached: %s", track_id, cache_path)
         return cache_path
 
-    if not stream_url:
-        logger.warning("No stream URL for track %s (%s)", track_id, title)
+    if not sc_url:
+        logger.warning("No SoundCloud URL for track %s (%s)", track_id, title)
         return None
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            resp = await client.get(stream_url)
-            if resp.status_code != 200:
-                logger.warning("Cannot download track %s (%s): HTTP %d", track_id, title, resp.status_code)
-                return None
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "-x",                        # extract audio
+                "--audio-format", "mp3",      # convert to mp3
+                "--audio-quality", "0",       # best quality
+                "-o", cache_path.replace(".mp3", ".%(ext)s"),
+                "--no-playlist",
+                "--quiet",
+                sc_url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
 
-            with open(cache_path, "wb") as f:
-                f.write(resp.content)
-
-            if os.path.getsize(cache_path) < 1000:
-                os.remove(cache_path)
-                logger.warning("Downloaded file too small for track %s, likely not audio", track_id)
-                return None
-
-            logger.info("Downloaded SC track %s → %s (%d bytes)", track_id, cache_path, len(resp.content))
+        # yt-dlp may output with different extension before conversion
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1000:
+            logger.info("Downloaded SC track %s → %s", track_id, cache_path)
             return cache_path
 
+        # Check for the file without extension match
+        for ext in [".mp3", ".opus", ".m4a", ".ogg", ".wav"]:
+            alt_path = cache_path.replace(".mp3", ext)
+            if os.path.exists(alt_path) and os.path.getsize(alt_path) > 1000:
+                logger.info("Downloaded SC track %s → %s", track_id, alt_path)
+                return alt_path
+
+        logger.warning(
+            "yt-dlp failed for track %s (%s): %s",
+            track_id, title, result.stderr[:200] if result.stderr else "no output"
+        )
+        return None
+
+    except subprocess.TimeoutExpired:
+        logger.error("yt-dlp timed out for track %s", track_id)
+        return None
     except Exception as e:
         logger.error("Failed to download SC track %s: %s", track_id, e)
         return None

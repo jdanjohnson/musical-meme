@@ -5,7 +5,7 @@ import { api, type Track, type SetTrack, type ArcType, type TransitionScore } fr
 import { TrackTable } from "@/components/track-table";
 import { EnergyArc } from "@/components/energy-arc";
 import { CAMELOT_COLORS, formatDuration } from "@/lib/camelot";
-import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight } from "lucide-react";
+import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight, Download, ExternalLink, Music } from "lucide-react";
 
 export default function SetBuilderPage() {
   const [allTracks, setAllTracks] = useState<Track[]>([]);
@@ -102,7 +102,35 @@ export default function SetBuilderPage() {
     }
   }, [setTracks, targetMinutes, selectedArc, bpmRange]);
 
-  const totalDuration = setTracks.reduce((sum, t) => sum + t.track.duration, 0);
+  const handleExportText = useCallback(() => {
+    const lines = [
+      `DJ Set — ${setTracks.length} tracks — ${formatDuration(totalDurationRaw)}`,
+      `Arc: ${arcTypes.find((a) => a.id === selectedArc)?.name || selectedArc}`,
+      "",
+      "# | Track | Artist | BPM | Key | Energy | Transition | SoundCloud",
+      "-".repeat(100),
+    ];
+
+    for (const st of setTracks) {
+      const t = st.track;
+      const scLink = t.soundcloud_url || "";
+      const transition = st.transition?.harmonic_move || "";
+      lines.push(
+        `${st.position}. ${t.title || t.filename} | ${t.artist || "?"} | ${t.bpm?.toFixed(1)} | ${t.camelot} | ${t.energy_level}/10 | ${transition} | ${scLink}`
+      );
+    }
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dj-set-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [setTracks, selectedArc, arcTypes]);
+
+  const totalDurationRaw = setTracks.reduce((sum, t) => sum + t.track.duration, 0);
+  const totalDuration = totalDurationRaw;
 
   if (loading) {
     return (
@@ -187,6 +215,16 @@ export default function SetBuilderPage() {
             <Wand2 className="w-4 h-4" />
             {generating ? "Generating..." : "Auto-Generate Set"}
           </button>
+
+          {setTracks.length > 0 && (
+            <button
+              onClick={handleExportText}
+              className="flex items-center gap-2 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-sm font-medium text-zinc-200 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Export Set
+            </button>
+          )}
         </div>
 
         {arcTypes.find((a) => a.id === selectedArc) && (
@@ -194,6 +232,28 @@ export default function SetBuilderPage() {
             {arcTypes.find((a) => a.id === selectedArc)!.description}
           </p>
         )}
+
+        {/* Quick presets */}
+        <div className="flex gap-2 mt-3 flex-wrap">
+          <button
+            onClick={() => { setSelectedArc("pride_night"); setTargetMinutes(240); }}
+            className="px-3 py-1 bg-gradient-to-r from-red-500/20 via-purple-500/20 to-blue-500/20 border border-purple-500/30 rounded-full text-xs text-purple-300 hover:border-purple-400/50 transition-colors"
+          >
+            Pride Night (4hr)
+          </button>
+          <button
+            onClick={() => { setSelectedArc("sexy_groovy"); setTargetMinutes(180); }}
+            className="px-3 py-1 bg-pink-500/10 border border-pink-500/20 rounded-full text-xs text-pink-300 hover:border-pink-400/40 transition-colors"
+          >
+            Sexy & Groovy
+          </button>
+          <button
+            onClick={() => { setSelectedArc("long_build"); setTargetMinutes(300); }}
+            className="px-3 py-1 bg-amber-500/10 border border-amber-500/20 rounded-full text-xs text-amber-300 hover:border-amber-400/40 transition-colors"
+          >
+            Long Build (5hr)
+          </button>
+        </div>
       </div>
 
       {/* Energy Arc Visualization */}
@@ -360,6 +420,19 @@ function SetTrackRow({
       <span className="text-xs font-mono text-zinc-400 w-12 text-right">
         {formatDuration(track.duration)}
       </span>
+
+      {track.soundcloud_url && (
+        <a
+          href={track.soundcloud_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="opacity-0 group-hover:opacity-100 text-orange-400 hover:text-orange-300 transition"
+          title="Open on SoundCloud"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ExternalLink className="w-4 h-4" />
+        </a>
+      )}
 
       <button
         onClick={onRemove}

@@ -135,6 +135,13 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE tracks ADD COLUMN soundcloud_tags TEXT")
             await db.commit()
 
+        try:
+            await db.execute("SELECT has_vocals FROM tracks LIMIT 1")
+        except Exception:
+            await db.execute("ALTER TABLE tracks ADD COLUMN has_vocals INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN vocal_confidence REAL DEFAULT 0")
+            await db.commit()
+
         await db.commit()
     finally:
         await db.close()

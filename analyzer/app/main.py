@@ -19,6 +19,7 @@ from app.theory import (
     auto_generate_set,
     harmonic_relationship,
     camelot_distance,
+    analyze_set_gaps,
 )
 from app.soundcloud import (
     set_apify_token,
@@ -28,6 +29,8 @@ from app.soundcloud import (
     download_track_ytdlp,
     sc_track_hash,
     parse_sc_track,
+    discover_playlist_tracks,
+    get_track_metadata,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -590,6 +593,39 @@ async def export_set(params: dict[str, Any]):
     }
 
 
+@app.post("/api/analyze-gaps")
+async def analyze_gaps(params: dict[str, Any]):
+    """Analyze a generated set for energy, harmonic, and BPM gaps.
+
+    Returns suggestions for what tracks to find to fill holes in the vibe.
+    """
+    db = await get_db()
+    try:
+        tracks = await get_all_tracks(db)
+    finally:
+        await db.close()
+
+    if not tracks:
+        raise HTTPException(status_code=400, detail="No tracks in library")
+
+    arc = params.get("arc_type", "standard")
+    target = params.get("target_minutes", 60)
+    bpm_range = params.get("bpm_range", 8)
+
+    set_result = auto_generate_set(tracks, None, target, arc, bpm_range)
+    set_track_dicts = [t for t, _ in set_result]
+
+    gaps = analyze_set_gaps(set_track_dicts, arc, target)
+
+    return {
+        "gaps": gaps,
+        "total_gaps": len(gaps),
+        "high_severity": len([g for g in gaps if g["severity"] == "high"]),
+        "set_tracks": len(set_track_dicts),
+        "set_duration_minutes": sum(t.get("duration", 300) for t in set_track_dicts) / 60,
+    }
+
+
 # --- SoundCloud endpoints (via Apify) ---
 
 # Track active SC imports
@@ -736,20 +772,19 @@ async def list_sc_imports():
 
 
 async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> None:
-    """Background task: scrape SC URL via Apify, download streams, analyze each track."""
+    """Background task: discover tracks via yt-dlp, download, analyze each."""
     job = active_sc_imports[import_id]
     job["status"] = "scraping"
 
     try:
-        # Run Apify scrape in thread pool (it's synchronous/blocking)
         loop = asyncio.get_event_loop()
-        sc_tracks = await loop.run_in_executor(
-            None, scrape_soundcloud_url, [soundcloud_url], max_items
-        )
 
-        job["total_tracks"] = len(sc_tracks)
+        # Step 1: Discover all tracks in playlist via yt-dlp (handles SC pagination)
+        discovered = await loop.run_in_executor(None, discover_playlist_tracks, soundcloud_url)
+
+        job["total_tracks"] = len(discovered)
         job["status"] = "analyzing"
-        logger.info("SC import %d: Apify found %d tracks from %s", import_id, len(sc_tracks), soundcloud_url)
+        logger.info("SC import %d: yt-dlp discovered %d tracks from %s", import_id, len(discovered), soundcloud_url)
 
         # Check which SC tracks are already in DB
         db = await get_db()
@@ -758,9 +793,9 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
         finally:
             await db.close()
 
-        for sc_item in sc_tracks:
-            meta = parse_sc_track(sc_item)
-            track_id = meta["track_id"]
+        for disc in discovered:
+            track_url = disc["url"]
+            track_id = disc["track_id"]
             if not track_id:
                 job["error_tracks"] += 1
                 job["processed_tracks"] += 1
@@ -775,23 +810,35 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
                 job["processed_tracks"] += 1
                 continue
 
-            job["current_track"] = meta.get("title", f"Track {track_id}")
+            job["current_track"] = disc.get("title") or f"Track {track_id}"
 
             try:
-                # Download via yt-dlp using the track's SC URL
-                track_url = meta.get("url", "")
+                # Step 2: Get metadata via yt-dlp (title, artist, genre, tags)
+                meta = await loop.run_in_executor(None, get_track_metadata, track_url)
+                if not meta:
+                    meta = {"track_id": track_id, "url": track_url, "title": disc.get("title", "")}
+
+                # Use the resolved URL if available
+                resolved_url = meta.get("url") or track_url
+                resolved_id = meta.get("track_id") or track_id
+
+                # Update job display with real title
+                if meta.get("title"):
+                    job["current_track"] = meta["title"]
+
+                # Step 3: Download audio via yt-dlp
                 local_path = await loop.run_in_executor(
-                    None, download_track_ytdlp, track_url, track_id, meta.get("title", "")
+                    None, download_track_ytdlp, resolved_url, resolved_id, meta.get("title", "")
                 )
                 if not local_path:
                     job["skipped_tracks"] += 1
                     job["processed_tracks"] += 1
                     continue
 
-                # Analyze in thread pool
+                # Step 4: Analyze with librosa
                 result = await loop.run_in_executor(None, analyze_track, local_path, None)
 
-                # Override with SC metadata + use fake path for dedup
+                # Override with SC metadata
                 track_data = result.to_dict()
                 track_data["file_path"] = fake_path
                 track_data["file_hash"] = expected_hash
@@ -800,7 +847,7 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
                 track_data["genre"] = meta.get("genre") or track_data.get("genre") or "SoundCloud"
                 track_data["folder"] = "SoundCloud"
                 track_data["filename"] = f"{meta.get('title', f'sc_{track_id}')}.mp3"
-                track_data["soundcloud_url"] = meta.get("url", "")
+                track_data["soundcloud_url"] = resolved_url
                 if meta.get("tags"):
                     track_data["soundcloud_tags"] = json.dumps(meta["tags"])
 

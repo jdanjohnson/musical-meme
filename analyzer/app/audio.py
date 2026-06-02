@@ -82,6 +82,8 @@ class AnalysisResult:
     spectral_centroid: float
     energy_level: int
     brightness: float
+    has_vocals: bool
+    vocal_confidence: float
     format: str
     sample_rate: int
     channels: int
@@ -201,6 +203,61 @@ def compute_energy(y: np.ndarray, sr: int) -> tuple[float, float, float, float, 
     )
 
 
+def detect_vocals(y: np.ndarray, sr: int) -> tuple[bool, float]:
+    """Detect vocal presence using spectral contrast and MFCCs.
+
+    Vocals have distinctive spectral characteristics:
+    - High spectral contrast in the 300-3000 Hz range (voice fundamental + harmonics)
+    - Specific MFCC patterns (MFCCs 1-4 carry vocal formant info)
+    - Higher spectral flatness in vocal regions vs. purely instrumental
+
+    Returns (has_vocals: bool, confidence: 0.0-1.0).
+    """
+    # Spectral contrast — vocals increase contrast in mid-frequency bands
+    contrast = librosa.feature.spectral_contrast(y=y, sr=sr, n_bands=6)
+    mid_contrast = float(np.mean(contrast[2:5]))  # bands covering ~300-3000 Hz
+
+    # MFCCs — vocal tracks have higher variance in MFCCs 1-4
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc_var = float(np.mean(np.var(mfccs[1:5], axis=1)))
+
+    # Spectral flatness — vocals are more tonal (lower flatness) than noise
+    flatness = librosa.feature.spectral_flatness(y=y)
+    avg_flatness = float(np.mean(flatness))
+
+    # Zero crossing rate — speech/vocals have moderate ZCR
+    zcr = librosa.feature.zero_crossing_rate(y)
+    avg_zcr = float(np.mean(zcr))
+
+    # Scoring heuristic combining multiple indicators
+    vocal_score = 0.0
+
+    # Mid-band spectral contrast > 20 suggests vocals
+    if mid_contrast > 25:
+        vocal_score += 0.35
+    elif mid_contrast > 18:
+        vocal_score += 0.2
+
+    # High MFCC variance indicates vocal formants
+    if mfcc_var > 100:
+        vocal_score += 0.35
+    elif mfcc_var > 50:
+        vocal_score += 0.2
+
+    # Low-to-moderate flatness (tonal content like voice)
+    if 0.01 < avg_flatness < 0.15:
+        vocal_score += 0.15
+
+    # Moderate ZCR typical of voice
+    if 0.03 < avg_zcr < 0.12:
+        vocal_score += 0.15
+
+    confidence = min(1.0, vocal_score)
+    has_vocals = confidence >= 0.5
+
+    return has_vocals, confidence
+
+
 def infer_genre_from_path(filepath: str, root_folder: str | None = None) -> str | None:
     """Infer genre from folder structure.
 
@@ -259,6 +316,9 @@ def analyze_track(filepath: str, root_folder: str | None = None) -> AnalysisResu
     # Energy analysis
     energy_rms, loudness, spectral_centroid, brightness, energy_level = compute_energy(y, sr)
 
+    # Vocal detection
+    has_vocals, vocal_confidence = detect_vocals(y, sr)
+
     # Genre from folder
     genre = infer_genre_from_path(filepath, root_folder)
 
@@ -280,6 +340,8 @@ def analyze_track(filepath: str, root_folder: str | None = None) -> AnalysisResu
         spectral_centroid=spectral_centroid,
         energy_level=energy_level,
         brightness=brightness,
+        has_vocals=has_vocals,
+        vocal_confidence=round(vocal_confidence, 3),
         format=path.suffix.lstrip(".").upper(),
         sample_rate=sample_rate,
         channels=channels,

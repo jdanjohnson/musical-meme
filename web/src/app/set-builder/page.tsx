@@ -5,7 +5,7 @@ import { api, type Track, type SetTrack, type ArcType, type TransitionScore } fr
 import { TrackTable } from "@/components/track-table";
 import { EnergyArc } from "@/components/energy-arc";
 import { CAMELOT_COLORS, formatDuration } from "@/lib/camelot";
-import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight, Download, ExternalLink, Music } from "lucide-react";
+import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight, Download, ExternalLink, Music, AlertTriangle, Search } from "lucide-react";
 
 export default function SetBuilderPage() {
   const [allTracks, setAllTracks] = useState<Track[]>([]);
@@ -19,6 +19,11 @@ export default function SetBuilderPage() {
   const [generating, setGenerating] = useState(false);
   const [suggestions, setSuggestions] = useState<Array<{ track: Track; score: TransitionScore }>>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [gaps, setGaps] = useState<Array<{
+    type: string; severity: string; position: number;
+    time_in_set: string; message: string; suggestion: string;
+  }>>([]);
+  const [analyzingGaps, setAnalyzingGaps] = useState(false);
 
   useEffect(() => {
     Promise.all([api.getTracks(), api.getArcTypes()])
@@ -101,6 +106,22 @@ export default function SetBuilderPage() {
       console.error(e);
     }
   }, [setTracks, targetMinutes, selectedArc, bpmRange]);
+
+  const handleAnalyzeGaps = useCallback(async () => {
+    setAnalyzingGaps(true);
+    try {
+      const result = await api.analyzeGaps({
+        arc_type: selectedArc,
+        target_minutes: targetMinutes,
+        bpm_range: bpmRange,
+      });
+      setGaps(result.gaps);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setAnalyzingGaps(false);
+    }
+  }, [selectedArc, targetMinutes, bpmRange]);
 
   const handleExportText = useCallback(() => {
     const lines = [
@@ -355,6 +376,51 @@ export default function SetBuilderPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Gap Analysis */}
+      {setTracks.length > 2 && (
+        <div className="bg-zinc-900 rounded-xl border border-zinc-800">
+          <div className="p-5 border-b border-zinc-800 flex justify-between items-center">
+            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+              <Search className="w-5 h-5 text-amber-400" />
+              Vibe Gap Analysis
+            </h2>
+            <button
+              onClick={handleAnalyzeGaps}
+              disabled={analyzingGaps}
+              className="flex items-center gap-2 px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/30 rounded-lg text-xs text-amber-300 transition-colors"
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              {analyzingGaps ? "Analyzing..." : "Find Gaps"}
+            </button>
+          </div>
+
+          {gaps.length === 0 ? (
+            <div className="p-6 text-center text-zinc-500 text-sm">
+              Click &quot;Find Gaps&quot; to analyze your set for energy, harmonic, and BPM holes
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-800/50">
+              {gaps.map((gap, i) => (
+                <div key={i} className="px-5 py-3 flex items-start gap-3">
+                  <span className={`mt-0.5 px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    gap.severity === "high" ? "bg-red-500/20 text-red-400" :
+                    gap.severity === "medium" ? "bg-amber-500/20 text-amber-400" :
+                    "bg-blue-500/20 text-blue-400"
+                  }`}>
+                    {gap.type}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-zinc-300">{gap.message}</div>
+                    <div className="text-xs text-purple-400 mt-1">💡 {gap.suggestion}</div>
+                  </div>
+                  <span className="text-xs text-zinc-500 shrink-0">@{gap.time_in_set}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

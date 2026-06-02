@@ -420,3 +420,126 @@ def auto_generate_set(
         current = next_track
 
     return result
+
+
+def analyze_set_gaps(
+    set_tracks: list[dict],
+    arc_type: str = "standard",
+    target_minutes: int = 60,
+) -> list[dict]:
+    """Analyze a generated set and identify gaps in the vibe/energy/harmony.
+
+    Returns list of gap descriptions with suggestions for what to find.
+    """
+    gaps = []
+
+    if len(set_tracks) < 2:
+        return gaps
+
+    total_duration = sum(t.get("duration", 300) for t in set_tracks) / 60
+
+    # Check if set is too short for target
+    if total_duration < target_minutes * 0.8:
+        deficit = target_minutes - total_duration
+        gaps.append({
+            "type": "duration",
+            "severity": "high",
+            "position": len(set_tracks),
+            "time_in_set": f"{int(total_duration)}min",
+            "message": f"Set is {int(deficit)} minutes short of {target_minutes}min target — need more tracks",
+            "suggestion": f"Find {int(deficit / 4)} more tracks around {set_tracks[-1].get('bpm', 128):.0f} BPM",
+        })
+
+    # Analyze transitions for weak spots
+    arcs = {
+        "standard": _standard_arc,
+        "warmup_peak": _warmup_peak_arc,
+        "peak_sustain": _peak_sustain_arc,
+        "journey": _journey_arc,
+        "flat": lambda p: 5,
+        "pride_night": _pride_night_arc,
+        "sexy_groovy": _sexy_groovy_arc,
+        "long_build": _long_build_arc,
+    }
+    arc_fn = arcs.get(arc_type, _standard_arc)
+
+    for i in range(1, len(set_tracks)):
+        prev = set_tracks[i - 1]
+        curr = set_tracks[i]
+        position = i / len(set_tracks)
+        time_min = sum(t.get("duration", 300) for t in set_tracks[:i]) / 60
+
+        # Energy gap check
+        target_energy = arc_fn(position)
+        actual_energy = curr.get("energy_level", 5)
+        energy_delta = abs(actual_energy - target_energy)
+
+        if energy_delta > 3:
+            gaps.append({
+                "type": "energy",
+                "severity": "high",
+                "position": i,
+                "time_in_set": f"{int(time_min)}min",
+                "message": f"Energy mismatch at position {i + 1}: track is {actual_energy}/10 but arc wants {target_energy:.0f}/10",
+                "suggestion": f"Find a track with energy ~{target_energy:.0f} around {curr.get('bpm', 128):.0f} BPM in key {curr.get('camelot', '?')}",
+            })
+
+        # Harmonic gap check
+        h_score, h_desc = harmonic_relationship(
+            prev.get("camelot", ""), curr.get("camelot", "")
+        )
+        if h_score < 0.4:
+            # Find what key would bridge nicely
+            prev_cam = parse_camelot(prev.get("camelot", ""))
+            curr_cam = parse_camelot(curr.get("camelot", ""))
+            bridge_keys = []
+            if prev_cam:
+                n, l = prev_cam
+                bridge_keys.append(f"{n}{l}")
+                bridge_keys.append(f"{(n % 12) + 1}{l}")
+                bridge_keys.append(f"{n}{'B' if l == 'A' else 'A'}")
+
+            gaps.append({
+                "type": "harmonic",
+                "severity": "medium",
+                "position": i,
+                "time_in_set": f"{int(time_min)}min",
+                "message": f"Rough key change at position {i + 1}: {prev.get('camelot', '?')} → {curr.get('camelot', '?')} ({h_desc})",
+                "suggestion": f"Insert a bridge track in key {' or '.join(bridge_keys[:2])} between these two",
+            })
+
+        # BPM jump check
+        bpm_delta = abs((prev.get("bpm", 0) or 0) - (curr.get("bpm", 0) or 0))
+        if bpm_delta > 15:
+            avg_bpm = ((prev.get("bpm", 0) or 0) + (curr.get("bpm", 0) or 0)) / 2
+            gaps.append({
+                "type": "bpm",
+                "severity": "medium",
+                "position": i,
+                "time_in_set": f"{int(time_min)}min",
+                "message": f"BPM jump at position {i + 1}: {prev.get('bpm', 0):.0f} → {curr.get('bpm', 0):.0f} (Δ{bpm_delta:.0f})",
+                "suggestion": f"Insert a track around {avg_bpm:.0f} BPM to smooth the transition",
+            })
+
+    # Check for energy plateau (same energy for too many tracks in a row)
+    streak = 1
+    for i in range(1, len(set_tracks)):
+        if set_tracks[i].get("energy_level") == set_tracks[i - 1].get("energy_level"):
+            streak += 1
+        else:
+            streak = 1
+
+        if streak >= 4:
+            time_min = sum(t.get("duration", 300) for t in set_tracks[:i]) / 60
+            energy = set_tracks[i].get("energy_level", 5)
+            gaps.append({
+                "type": "plateau",
+                "severity": "low",
+                "position": i,
+                "time_in_set": f"{int(time_min)}min",
+                "message": f"Energy plateau: {streak} tracks at energy {energy} — crowd may lose interest",
+                "suggestion": f"Mix in a track with energy {energy + 2 if energy < 8 else energy - 2} for contrast",
+            })
+            streak = 1  # Reset after flagging
+
+    return gaps

@@ -183,6 +183,27 @@ export const api = {
   scImports: () =>
     fetcher<{ imports: SCImportStatus[] }>("/api/soundcloud/imports"),
 
+  // Gap Analysis
+  analyzeGaps: (params: {
+    arc_type?: string;
+    target_minutes?: number;
+    bpm_range?: number;
+  }) =>
+    fetcher<{
+      gaps: Array<{
+        type: string;
+        severity: string;
+        position: number;
+        time_in_set: string;
+        message: string;
+        suggestion: string;
+      }>;
+      total_gaps: number;
+      high_severity: number;
+      set_tracks: number;
+      set_duration_minutes: number;
+    }>("/api/analyze-gaps", { method: "POST", body: JSON.stringify(params) }),
+
   // Export
   exportSet: (params: {
     soundcloud_only?: boolean;

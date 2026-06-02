@@ -389,6 +389,23 @@ async def delete_track(track_id: int):
         await db.close()
 
 
+@app.delete("/api/tracks/clear-all")
+async def clear_all_tracks():
+    """Delete ALL tracks from the library. Does NOT add them to skip list."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT COUNT(*) FROM tracks")
+        row = await cursor.fetchone()
+        count = row[0] if row else 0
+        await db.execute("DELETE FROM tracks")
+        # Also clear the skip list so re-scans work fresh
+        await db.execute("DELETE FROM deleted_tracks")
+        await db.commit()
+        return {"cleared": True, "tracks_removed": count}
+    finally:
+        await db.close()
+
+
 @app.get("/api/tracks/{track_id}/audio")
 async def stream_track_audio(track_id: int):
     """Serve audio file for in-browser playback."""

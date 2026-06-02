@@ -100,6 +100,24 @@ export default function LibraryPage() {
             <RefreshCw className={`w-4 h-4 ${reanalyzing ? "animate-spin" : ""}`} />
             {reanalyzing ? reanalyzeProgress : "Re-analyze All"}
           </button>
+          <button
+            onClick={async () => {
+              if (!confirm("Clear entire library? This removes ALL tracks and resets the skip list. This cannot be undone.")) return;
+              try {
+                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/tracks/clear-all`, { method: "DELETE" });
+                const data = await res.json();
+                setTracks([]);
+                setSelectedTrack(null);
+                alert(`Library cleared — ${data.tracks_removed} tracks removed.`);
+              } catch (e) {
+                console.error("Failed to clear library", e);
+              }
+            }}
+            className="flex items-center gap-2 px-3 py-1.5 bg-red-600/20 text-red-400 rounded-lg text-sm hover:bg-red-600/30 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+            Clear Library
+          </button>
         </div>
       </div>
 

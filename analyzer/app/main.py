@@ -296,6 +296,21 @@ async def get_track(track_id: int):
         await db.close()
 
 
+@app.delete("/api/tracks/{track_id}")
+async def delete_track(track_id: int):
+    """Delete a track from the library."""
+    db = await get_db()
+    try:
+        track = await get_track_by_id(db, track_id)
+        if not track:
+            raise HTTPException(status_code=404, detail="Track not found")
+        await db.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
+        await db.commit()
+        return {"deleted": True, "id": track_id}
+    finally:
+        await db.close()
+
+
 @app.get("/api/tracks/{track_id}/audio")
 async def stream_track_audio(track_id: int):
     """Serve audio file for in-browser playback."""

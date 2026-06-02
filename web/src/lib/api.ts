@@ -121,6 +121,9 @@ export const api = {
 
   getTrack: (id: number) => fetcher<Track>(`/api/tracks/${id}`),
 
+  deleteTrack: (id: number) =>
+    fetcher<{ deleted: boolean; id: number }>(`/api/tracks/${id}`, { method: "DELETE" }),
+
   getStats: () => fetcher<LibraryStats>("/api/stats"),
 
   // Theory / Set Planning

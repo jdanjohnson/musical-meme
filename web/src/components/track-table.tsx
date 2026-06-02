@@ -3,7 +3,7 @@
 import { useState, useMemo } from "react";
 import type { Track, TransitionScore } from "@/lib/api";
 import { CAMELOT_COLORS, formatDuration } from "@/lib/camelot";
-import { ChevronUp, ChevronDown, Music2 } from "lucide-react";
+import { ChevronUp, ChevronDown, Music2, Trash2 } from "lucide-react";
 
 interface TrackTableProps {
   tracks: Track[];
@@ -11,12 +11,13 @@ interface TrackTableProps {
   selectedTrackId?: number | null;
   scores?: Map<number, TransitionScore>;
   compact?: boolean;
+  onDeleteTrack?: (id: number) => void;
 }
 
 type SortKey = "filename" | "bpm" | "camelot" | "energy_level" | "genre" | "duration" | "key";
 type SortDir = "asc" | "desc";
 
-export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, compact }: TrackTableProps) {
+export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, compact, onDeleteTrack }: TrackTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("filename");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [filter, setFilter] = useState("");
@@ -92,6 +93,7 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                 <span className="flex items-center gap-1 justify-end">Duration <SortIcon col="duration" /></span>
               </th>
               {scores && <th className="text-center px-3 py-2">Score</th>}
+              {onDeleteTrack && <th className="w-8 px-2 py-2" />}
             </tr>
           </thead>
           <tbody>
@@ -149,6 +151,22 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                       ) : (
                         "—"
                       )}
+                    </td>
+                  )}
+                  {onDeleteTrack && (
+                    <td className="px-2 py-2 text-center">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm("Delete this track from the library?")) {
+                            onDeleteTrack(track.id);
+                          }
+                        }}
+                        className="text-zinc-600 hover:text-red-400 transition-colors"
+                        title="Delete track"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </td>
                   )}
                 </tr>

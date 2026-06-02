@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api, type Track } from "@/lib/api";
 import { TrackTable } from "@/components/track-table";
 import { CAMELOT_COLORS, CAMELOT_TO_KEY, formatDuration } from "@/lib/camelot";
-import { Disc3, X } from "lucide-react";
+import { Disc3, Trash2, X } from "lucide-react";
 
 export default function LibraryPage() {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -39,6 +39,15 @@ export default function LibraryPage() {
             tracks={tracks}
             onTrackSelect={setSelectedTrack}
             selectedTrackId={selectedTrack?.id}
+            onDeleteTrack={async (id) => {
+              try {
+                await api.deleteTrack(id);
+                setTracks((prev) => prev.filter((t) => t.id !== id));
+                if (selectedTrack?.id === id) setSelectedTrack(null);
+              } catch (e) {
+                console.error("Failed to delete track", e);
+              }
+            }}
           />
         </div>
 

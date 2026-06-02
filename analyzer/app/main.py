@@ -25,6 +25,8 @@ from app.theory import (
     analyze_set_gaps,
     deduplicate_tracks,
     normalize_track_name,
+    parse_vibe,
+    vibe_generate_set,
 )
 from app.soundcloud import (
     set_apify_token,
@@ -86,6 +88,7 @@ class SetGenerateRequest(BaseModel):
     arc_type: str = "standard"
     bpm_range: float = 8.0
     genre_filter: Optional[str] = None
+    vibe: Optional[str] = None
 
 
 class SuggestRequest(BaseModel):
@@ -623,14 +626,25 @@ async def generate_set(req: SetGenerateRequest):
     if not all_tracks:
         raise HTTPException(status_code=400, detail="No tracks in library. Run a scan first.")
 
-    result = auto_generate_set(
-        all_tracks,
-        start_track,
-        req.target_minutes,
-        req.arc_type,
-        req.bpm_range,
-        req.genre_filter,
-    )
+    # Use vibe-based generation if a vibe description is provided
+    if req.vibe and req.vibe.strip():
+        result = vibe_generate_set(
+            all_tracks,
+            req.vibe,
+            req.target_minutes,
+            req.bpm_range,
+        )
+        vibe_info = parse_vibe(req.vibe)
+    else:
+        result = auto_generate_set(
+            all_tracks,
+            start_track,
+            req.target_minutes,
+            req.arc_type,
+            req.bpm_range,
+            req.genre_filter,
+        )
+        vibe_info = None
 
     tracks_out = []
     total_duration = 0
@@ -651,12 +665,20 @@ async def generate_set(req: SetGenerateRequest):
             } if score else None,
         })
 
-    return {
+    resp = {
         "set": tracks_out,
         "total_tracks": len(tracks_out),
         "total_duration_minutes": round(total_duration / 60, 1),
         "arc_type": req.arc_type,
     }
+    if vibe_info:
+        resp["vibe"] = {
+            "description": req.vibe,
+            "energy_range": vibe_info["energy_range"],
+            "bpm_range": vibe_info["bpm_range"],
+            "keywords_matched": vibe_info["keywords_matched"],
+        }
+    return resp
 
 
 @app.get("/api/arc-types")

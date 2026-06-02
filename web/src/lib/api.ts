@@ -171,12 +171,19 @@ export const api = {
     arc_type?: string;
     bpm_range?: number;
     genre_filter?: string;
+    vibe?: string;
   }) =>
     fetcher<{
       set: SetTrack[];
       total_tracks: number;
       total_duration_minutes: number;
       arc_type: string;
+      vibe?: {
+        description: string;
+        energy_range: [number, number];
+        bpm_range: [number, number];
+        keywords_matched: string[];
+      };
     }>("/api/generate-set", { method: "POST", body: JSON.stringify(params) }),
 
   getArcTypes: () => fetcher<{ arc_types: ArcType[] }>("/api/arc-types"),

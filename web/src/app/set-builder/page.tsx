@@ -6,7 +6,7 @@ import { TrackTable } from "@/components/track-table";
 import { EnergyArc } from "@/components/energy-arc";
 import { CAMELOT_COLORS, formatDuration } from "@/lib/camelot";
 import { SetPlayer } from "@/components/set-player";
-import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight, Download, FolderDown, ExternalLink, Music, AlertTriangle, Search } from "lucide-react";
+import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight, Download, FolderDown, ExternalLink, Music, AlertTriangle, Search, Sparkles } from "lucide-react";
 
 export default function SetBuilderPage() {
   const [allTracks, setAllTracks] = useState<Track[]>([]);
@@ -27,6 +27,8 @@ export default function SetBuilderPage() {
   const [analyzingGaps, setAnalyzingGaps] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportResult, setExportResult] = useState<string | null>(null);
+  const [vibeText, setVibeText] = useState("");
+  const [vibeResult, setVibeResult] = useState<{ description: string; energy_range: [number, number]; bpm_range: [number, number]; keywords_matched: string[] } | null>(null);
 
   useEffect(() => {
     Promise.all([api.getTracks(), api.getArcTypes()])
@@ -42,21 +44,24 @@ export default function SetBuilderPage() {
 
   const handleGenerate = useCallback(async () => {
     setGenerating(true);
+    setVibeResult(null);
     try {
       const result = await api.generateSet({
         target_minutes: targetMinutes,
         arc_type: selectedArc,
         bpm_range: bpmRange,
         genre_filter: genreFilter || undefined,
+        vibe: vibeText || undefined,
       });
       setSetTracks(result.set);
       setShowSuggestions(false);
+      if (result.vibe) setVibeResult(result.vibe);
     } catch (e) {
       console.error(e);
     } finally {
       setGenerating(false);
     }
-  }, [targetMinutes, selectedArc, bpmRange, genreFilter]);
+  }, [targetMinutes, selectedArc, bpmRange, genreFilter, vibeText]);
 
   const handleAddTrack = useCallback(
     async (track: Track) => {
@@ -249,14 +254,27 @@ export default function SetBuilderPage() {
             </select>
           </div>
 
-          <button
-            onClick={handleGenerate}
-            disabled={generating || allTracks.length === 0}
-            className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium text-white transition-colors"
-          >
-            <Wand2 className="w-4 h-4" />
-            {generating ? "Generating..." : "Auto-Generate Set"}
-          </button>
+          <div className="flex-1 min-w-[200px]">
+            <label className="text-xs text-zinc-500 block mb-1">Describe your vibe</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={vibeText}
+                onChange={(e) => setVibeText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !generating) handleGenerate(); }}
+                placeholder='e.g. "chill indie sunset vibes" or "high energy pride night"'
+                className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+              />
+              <button
+                onClick={handleGenerate}
+                disabled={generating || allTracks.length === 0}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium text-white transition-colors whitespace-nowrap"
+              >
+                {vibeText.trim() ? <Sparkles className="w-4 h-4" /> : <Wand2 className="w-4 h-4" />}
+                {generating ? "Generating..." : vibeText.trim() ? "Vibe Generate" : "Auto-Generate"}
+              </button>
+            </div>
+          </div>
 
           {setTracks.length > 0 && (
             <>
@@ -288,6 +306,21 @@ export default function SetBuilderPage() {
         {exportResult && (
           <div className="mt-2 px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-xs text-emerald-300">
             {exportResult}
+          </div>
+        )}
+
+        {vibeResult && (
+          <div className="mt-2 px-3 py-2 bg-purple-500/10 border border-purple-500/20 rounded-lg text-xs text-purple-300 flex items-center gap-3">
+            <Sparkles className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              Vibe: <strong>&quot;{vibeResult.description}&quot;</strong>
+              {" "}&mdash; Energy {vibeResult.energy_range[0]}-{vibeResult.energy_range[1]}/10, BPM {vibeResult.bpm_range[0]}-{vibeResult.bpm_range[1]}
+              {vibeResult.keywords_matched.length > 0 && (
+                <span className="text-zinc-500 ml-1">
+                  (matched: {vibeResult.keywords_matched.join(", ")})
+                </span>
+              )}
+            </span>
           </div>
         )}
 

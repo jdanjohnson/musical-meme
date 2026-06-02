@@ -408,6 +408,240 @@ def deduplicate_tracks(tracks: list[dict]) -> list[dict]:
     return result
 
 
+_VIBE_KEYWORDS: dict[str, dict] = {
+    # Energy keywords -> target energy range (1-10)
+    "chill": {"energy": (1, 4), "bpm": (80, 115)},
+    "mellow": {"energy": (1, 4), "bpm": (80, 115)},
+    "relaxed": {"energy": (1, 4), "bpm": (80, 110)},
+    "laid back": {"energy": (1, 4), "bpm": (80, 110)},
+    "calm": {"energy": (1, 3), "bpm": (70, 105)},
+    "ambient": {"energy": (1, 3), "bpm": (60, 100)},
+    "downtempo": {"energy": (1, 4), "bpm": (70, 110)},
+    "lounge": {"energy": (2, 5), "bpm": (85, 115)},
+    "warm": {"energy": (3, 6), "bpm": (95, 125)},
+    "groovy": {"energy": (4, 7), "bpm": (110, 130)},
+    "funky": {"energy": (4, 7), "bpm": (110, 130)},
+    "sexy": {"energy": (3, 6), "bpm": (95, 125)},
+    "deep": {"energy": (3, 6), "bpm": (115, 128)},
+    "underground": {"energy": (4, 7), "bpm": (118, 132)},
+    "driving": {"energy": (5, 8), "bpm": (120, 138)},
+    "upbeat": {"energy": (5, 8), "bpm": (118, 135)},
+    "energetic": {"energy": (6, 9), "bpm": (120, 140)},
+    "high energy": {"energy": (7, 10), "bpm": (125, 145)},
+    "hype": {"energy": (7, 10), "bpm": (125, 150)},
+    "bangers": {"energy": (7, 10), "bpm": (125, 150)},
+    "peak time": {"energy": (7, 10), "bpm": (125, 140)},
+    "peak": {"energy": (7, 10), "bpm": (125, 140)},
+    "festival": {"energy": (7, 10), "bpm": (125, 150)},
+    "rave": {"energy": (7, 10), "bpm": (130, 160)},
+    "hard": {"energy": (8, 10), "bpm": (135, 160)},
+    "intense": {"energy": (8, 10), "bpm": (130, 155)},
+    "dark": {"energy": (5, 8), "bpm": (118, 135)},
+    "moody": {"energy": (3, 6), "bpm": (105, 128)},
+    "dreamy": {"energy": (2, 5), "bpm": (90, 120)},
+    "ethereal": {"energy": (2, 5), "bpm": (85, 120)},
+    "euphoric": {"energy": (6, 9), "bpm": (125, 140)},
+    "uplifting": {"energy": (5, 8), "bpm": (120, 138)},
+    "emotional": {"energy": (4, 7), "bpm": (110, 135)},
+    "nostalgic": {"energy": (3, 6), "bpm": (100, 128)},
+    "summer": {"energy": (4, 7), "bpm": (110, 130)},
+    "sunset": {"energy": (3, 6), "bpm": (100, 125)},
+    "sunrise": {"energy": (3, 6), "bpm": (110, 128)},
+    "after hours": {"energy": (3, 6), "bpm": (115, 130)},
+    "late night": {"energy": (4, 7), "bpm": (118, 132)},
+    "morning": {"energy": (3, 6), "bpm": (110, 128)},
+    "pool party": {"energy": (5, 8), "bpm": (115, 132)},
+    "beach": {"energy": (4, 7), "bpm": (105, 128)},
+    "club": {"energy": (5, 8), "bpm": (120, 135)},
+    "opening": {"energy": (2, 5), "bpm": (110, 125)},
+    "closing": {"energy": (3, 6), "bpm": (115, 130)},
+    "warmup": {"energy": (2, 5), "bpm": (110, 125)},
+    "warm up": {"energy": (2, 5), "bpm": (110, 125)},
+    "pride": {"energy": (6, 9), "bpm": (120, 135)},
+    "disco": {"energy": (5, 8), "bpm": (115, 130)},
+    "house": {"energy": (4, 7), "bpm": (118, 132)},
+    "techno": {"energy": (5, 8), "bpm": (125, 145)},
+    "minimal": {"energy": (3, 6), "bpm": (118, 132)},
+    "progressive": {"energy": (4, 7), "bpm": (122, 135)},
+    "trance": {"energy": (5, 8), "bpm": (130, 145)},
+    "melodic": {"energy": (4, 7), "bpm": (118, 135)},
+    "afro": {"energy": (5, 8), "bpm": (118, 132)},
+    "latin": {"energy": (5, 8), "bpm": (105, 128)},
+    "r&b": {"energy": (3, 6), "bpm": (85, 115)},
+    "hip hop": {"energy": (4, 7), "bpm": (85, 115)},
+    "rap": {"energy": (4, 7), "bpm": (80, 110)},
+    "trap": {"energy": (5, 8), "bpm": (130, 160)},
+    "drum and bass": {"energy": (6, 9), "bpm": (160, 180)},
+    "dnb": {"energy": (6, 9), "bpm": (160, 180)},
+    "jungle": {"energy": (6, 9), "bpm": (155, 175)},
+    "garage": {"energy": (4, 7), "bpm": (128, 140)},
+    "uk garage": {"energy": (4, 7), "bpm": (128, 140)},
+    "indie": {"energy": (3, 6), "bpm": (100, 130)},
+    "rock": {"energy": (5, 8), "bpm": (110, 140)},
+    "pop": {"energy": (4, 7), "bpm": (100, 130)},
+    "electronic": {"energy": (4, 7), "bpm": (115, 135)},
+    "vocal": {"energy": (4, 7), "vocals": True},
+    "vocals": {"energy": (4, 7), "vocals": True},
+    "instrumental": {"energy": (3, 7), "vocals": False},
+    "no vocals": {"energy": (3, 7), "vocals": False},
+}
+
+
+def parse_vibe(description: str) -> dict:
+    """Parse a natural-language vibe description into target track attributes.
+
+    Returns {energy_range: (lo, hi), bpm_range: (lo, hi), vocals: bool|None,
+             genre_hints: [str], raw: str}
+    """
+    desc = description.lower().strip()
+    energy_ranges = []
+    bpm_ranges = []
+    vocals = None
+    genre_hints = []
+
+    # Match keywords (longest first to handle multi-word matches like "high energy")
+    sorted_keywords = sorted(_VIBE_KEYWORDS.keys(), key=len, reverse=True)
+    matched = set()
+    for kw in sorted_keywords:
+        if kw in desc and kw not in matched:
+            attrs = _VIBE_KEYWORDS[kw]
+            if "energy" in attrs:
+                energy_ranges.append(attrs["energy"])
+            if "bpm" in attrs:
+                bpm_ranges.append(attrs["bpm"])
+            if "vocals" in attrs:
+                vocals = attrs["vocals"]
+            matched.add(kw)
+
+    # Merge ranges: take intersection
+    if energy_ranges:
+        energy_lo = max(r[0] for r in energy_ranges)
+        energy_hi = min(r[1] for r in energy_ranges)
+        if energy_lo > energy_hi:
+            energy_lo, energy_hi = min(r[0] for r in energy_ranges), max(r[1] for r in energy_ranges)
+        energy_range = (energy_lo, energy_hi)
+    else:
+        energy_range = (1, 10)
+
+    if bpm_ranges:
+        bpm_lo = max(r[0] for r in bpm_ranges)
+        bpm_hi = min(r[1] for r in bpm_ranges)
+        if bpm_lo > bpm_hi:
+            bpm_lo, bpm_hi = min(r[0] for r in bpm_ranges), max(r[1] for r in bpm_ranges)
+        bpm_range = (bpm_lo, bpm_hi)
+    else:
+        bpm_range = (60, 200)
+
+    return {
+        "energy_range": energy_range,
+        "bpm_range": bpm_range,
+        "vocals": vocals,
+        "keywords_matched": list(matched),
+        "raw": description,
+    }
+
+
+def score_track_vibe(track: dict, vibe: dict) -> float:
+    """Score how well a track matches a vibe profile (0-1)."""
+    score = 0.0
+    weights = 0.0
+
+    # Energy match (40% weight)
+    energy = track.get("energy_level", 5)
+    e_lo, e_hi = vibe["energy_range"]
+    if e_lo <= energy <= e_hi:
+        # Closer to middle of range = better
+        mid = (e_lo + e_hi) / 2
+        dist = abs(energy - mid) / max(1, (e_hi - e_lo) / 2)
+        score += 0.4 * (1 - dist * 0.3)  # slight penalty for edges
+    else:
+        dist = min(abs(energy - e_lo), abs(energy - e_hi))
+        score += 0.4 * max(0, 1 - dist * 0.25)
+    weights += 0.4
+
+    # BPM match (35% weight)
+    bpm = track.get("bpm", 120)
+    b_lo, b_hi = vibe["bpm_range"]
+    if b_lo <= bpm <= b_hi:
+        mid = (b_lo + b_hi) / 2
+        span = max(1, (b_hi - b_lo) / 2)
+        dist = abs(bpm - mid) / span
+        score += 0.35 * (1 - dist * 0.2)
+    else:
+        dist = min(abs(bpm - b_lo), abs(bpm - b_hi))
+        score += 0.35 * max(0, 1 - dist * 0.05)
+    weights += 0.35
+
+    # Vocal match (15% weight, only if specified)
+    if vibe["vocals"] is not None:
+        has_vocals = bool(track.get("has_vocals", False))
+        if has_vocals == vibe["vocals"]:
+            score += 0.15
+        else:
+            score += 0.03
+        weights += 0.15
+    else:
+        # Redistribute to energy + bpm
+        score += 0.15 * (score / max(0.01, weights))
+        weights += 0.15
+
+    # Brightness/mood bonus (10% weight)
+    brightness = track.get("brightness", 0.5)
+    # Higher energy vibes pair with brighter tracks
+    target_brightness = (e_lo + e_hi) / 20  # 0-1 scale
+    bright_match = 1 - abs(brightness - target_brightness)
+    score += 0.1 * max(0, bright_match)
+
+    return min(1.0, score)
+
+
+def vibe_generate_set(
+    all_tracks: list[dict],
+    vibe_description: str,
+    target_minutes: int = 60,
+    bpm_range_override: float = 8.0,
+) -> list[tuple[dict, TransitionScore | None]]:
+    """Generate a set based on a natural-language vibe description."""
+    pool = deduplicate_tracks(all_tracks)
+    if not pool:
+        return []
+
+    vibe = parse_vibe(vibe_description)
+
+    # Score all tracks against the vibe
+    scored = [(t, score_track_vibe(t, vibe)) for t in pool]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Take the top tracks that fit the vibe (at least 50% match)
+    vibe_pool = [t for t, s in scored if s >= 0.3]
+    if not vibe_pool:
+        vibe_pool = [t for t, _ in scored[:20]]
+
+    # Use the best vibe match as opener
+    opener = vibe_pool[0]
+
+    # Build the set using the standard algorithm but with the vibe-filtered pool
+    result: list[tuple[dict, TransitionScore | None]] = [(opener, None)]
+    used_ids = {opener["id"]}
+    total_duration = opener.get("duration", 300) / 60
+
+    while total_duration < target_minutes and len(used_ids) < len(vibe_pool):
+        position = min(1.0, total_duration / target_minutes)
+        suggestions = suggest_next_tracks(
+            result[-1][0], vibe_pool, position, "standard", bpm_range_override, used_ids, limit=5
+        )
+
+        if not suggestions:
+            break
+
+        next_track, score = suggestions[0]
+        result.append((next_track, score))
+        used_ids.add(next_track["id"])
+        total_duration += next_track.get("duration", 300) / 60
+
+    return result
+
+
 def auto_generate_set(
     all_tracks: list[dict],
     start_track: dict | None = None,

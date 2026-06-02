@@ -279,6 +279,70 @@ async def run_scan(job_id: int, folder_path: str) -> None:
         await db.close()
 
 
+# --- Re-analyze ---
+
+reanalyze_status: Dict[str, Any] = {"running": False, "total": 0, "processed": 0, "current": "", "errors": 0}
+
+
+async def run_reanalyze() -> None:
+    """Background task: re-analyze all tracks in the library."""
+    global reanalyze_status
+    reanalyze_status["running"] = True
+    reanalyze_status["errors"] = 0
+
+    db = await get_db()
+    try:
+        tracks = await get_all_tracks(db)
+    finally:
+        await db.close()
+
+    reanalyze_status["total"] = len(tracks)
+    reanalyze_status["processed"] = 0
+
+    for track in tracks:
+        file_path = track.get("file_path", "")
+        folder = track.get("folder", "")
+        try:
+            if not file_path or not os.path.isfile(file_path):
+                reanalyze_status["processed"] += 1
+                continue
+
+            reanalyze_status["current"] = track.get("filename", "")
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, analyze_track, file_path, folder)
+
+            db = await get_db()
+            try:
+                await upsert_track(db, result.to_dict())
+            finally:
+                await db.close()
+
+        except Exception as e:
+            logger.error("Re-analyze error for %s: %s", file_path, e)
+            reanalyze_status["errors"] += 1
+
+        reanalyze_status["processed"] += 1
+
+    reanalyze_status["running"] = False
+    reanalyze_status["current"] = ""
+
+
+@app.post("/api/reanalyze")
+async def reanalyze_all(background_tasks: BackgroundTasks):
+    """Re-analyze all tracks in the library with latest analysis logic."""
+    if reanalyze_status["running"]:
+        raise HTTPException(status_code=409, detail="Re-analysis already in progress")
+    background_tasks.add_task(run_reanalyze)
+    return {"message": "Re-analysis started"}
+
+
+@app.get("/api/reanalyze/status")
+async def reanalyze_progress():
+    """Check re-analysis progress."""
+    return reanalyze_status
+
+
 # --- Library endpoints ---
 
 

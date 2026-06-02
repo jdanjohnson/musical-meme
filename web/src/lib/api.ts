@@ -130,6 +130,12 @@ export const api = {
   cleanDuplicates: () =>
     fetcher<{ deleted_count: number; deleted_ids: number[] }>("/api/duplicates/clean", { method: "DELETE" }),
 
+  reanalyzeAll: () =>
+    fetcher<{ message: string }>("/api/reanalyze", { method: "POST" }),
+
+  reanalyzeStatus: () =>
+    fetcher<{ running: boolean; total: number; processed: number; current: string; errors: number }>("/api/reanalyze/status"),
+
   getStats: () => fetcher<LibraryStats>("/api/stats"),
 
   // Theory / Set Planning

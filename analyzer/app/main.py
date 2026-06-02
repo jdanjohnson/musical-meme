@@ -20,15 +20,13 @@ from app.theory import (
     camelot_distance,
 )
 from app.soundcloud import (
-    set_credentials as sc_set_credentials,
-    get_credentials as sc_get_credentials,
-    resolve_url,
-    get_user_playlists,
-    get_playlist_tracks,
-    download_track,
+    set_apify_token,
+    get_apify_token,
+    scrape_soundcloud_url,
+    scrape_artist_tracks,
+    download_stream,
     sc_track_hash,
-    parse_sc_track_metadata,
-    authenticate as sc_authenticate,
+    parse_sc_track,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -98,19 +96,17 @@ class TransitionRequest(BaseModel):
 
 
 class SCConnectRequest(BaseModel):
-    client_id: str
-    client_secret: str
+    apify_token: str
 
 
 class SCImportRequest(BaseModel):
-    playlist_url: str | None = None
-    playlist_id: int | None = None
-    user_url: str | None = None
+    soundcloud_url: str
+    max_items: int = 500
 
 
 class SCImportStatus(BaseModel):
     import_id: int
-    playlist_title: str | None = None
+    label: str | None = None
     status: str
     total_tracks: int
     processed_tracks: int
@@ -511,7 +507,7 @@ async def list_arc_types():
     }
 
 
-# --- SoundCloud endpoints ---
+# --- SoundCloud endpoints (via Apify) ---
 
 # Track active SC imports
 active_sc_imports: dict[int, dict] = {}
@@ -519,127 +515,52 @@ active_sc_imports: dict[int, dict] = {}
 
 @app.post("/api/soundcloud/connect")
 async def soundcloud_connect(req: SCConnectRequest):
-    """Configure SoundCloud API credentials."""
-    sc_set_credentials(req.client_id, req.client_secret)
+    """Configure Apify token for SoundCloud scraping."""
+    set_apify_token(req.apify_token)
+    # Quick validation — try to instantiate client
     try:
-        await sc_authenticate()
-        return {"status": "connected", "message": "SoundCloud authenticated successfully"}
+        from apify_client import ApifyClient
+        client = ApifyClient(req.apify_token)
+        user = client.user().get()
+        return {"status": "connected", "message": f"Connected as {user.get('username', 'unknown')}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/soundcloud/status")
 async def soundcloud_status():
-    """Check if SoundCloud is connected."""
-    creds = sc_get_credentials()
-    if not creds:
+    """Check if Apify is connected for SoundCloud scraping."""
+    token = get_apify_token()
+    if not token:
         return {"connected": False}
     try:
-        await sc_authenticate()
-        return {"connected": True, "client_id": creds.client_id[:8] + "..."}
+        from apify_client import ApifyClient
+        client = ApifyClient(token)
+        user = client.user().get()
+        return {"connected": True, "username": user.get("username", "")}
     except Exception:
-        return {"connected": False, "error": "Authentication failed"}
-
-
-@app.get("/api/soundcloud/playlists")
-async def soundcloud_playlists(user_url: str):
-    """Get playlists for a SoundCloud user URL."""
-    creds = sc_get_credentials()
-    if not creds:
-        raise HTTPException(status_code=400, detail="SoundCloud not connected. Call /api/soundcloud/connect first.")
-
-    try:
-        playlists = await get_user_playlists(user_url)
-        return {
-            "playlists": [
-                {
-                    "id": p.get("id"),
-                    "title": p.get("title"),
-                    "track_count": p.get("track_count", len(p.get("tracks", []))),
-                    "duration_ms": p.get("duration", 0),
-                    "permalink_url": p.get("permalink_url"),
-                    "artwork_url": p.get("artwork_url"),
-                    "created_at": p.get("created_at"),
-                }
-                for p in playlists
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return {"connected": False, "error": "Invalid Apify token"}
 
 
 @app.post("/api/soundcloud/import", response_model=SCImportStatus)
 async def soundcloud_import(req: SCImportRequest, background_tasks: BackgroundTasks):
-    """Import tracks from a SoundCloud playlist — downloads and analyzes in background."""
-    creds = sc_get_credentials()
-    if not creds:
-        raise HTTPException(status_code=400, detail="SoundCloud not connected")
+    """Import tracks from a SoundCloud URL — scrapes via Apify, downloads, and analyzes in background.
 
-    # Resolve the playlist
-    playlist_id = req.playlist_id
-    playlist_title = None
-    playlist_url = req.playlist_url
+    Accepts any SoundCloud URL: profile, playlist, or individual track.
+    The Apify actor resolves it and returns all tracks found.
+    """
+    token = get_apify_token()
+    if not token:
+        raise HTTPException(status_code=400, detail="Apify not connected. Call /api/soundcloud/connect first.")
 
-    if req.playlist_url and not req.playlist_id:
-        try:
-            resolved = await resolve_url(req.playlist_url)
-            playlist_id = resolved.get("id")
-            playlist_title = resolved.get("title")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Cannot resolve URL: {e}")
-    elif req.user_url:
-        # Import ALL playlists for a user
-        try:
-            playlists = await get_user_playlists(req.user_url)
-            # Start an import for each playlist
-            import_ids = []
-            for p in playlists:
-                pid = p.get("id")
-                ptitle = p.get("title")
-                db = await get_db()
-                try:
-                    cursor = await db.execute(
-                        "INSERT INTO soundcloud_imports (playlist_id, playlist_title, playlist_url, status, started_at) VALUES (?, ?, ?, ?, ?)",
-                        (pid, ptitle, p.get("permalink_url"), "pending", datetime.now(timezone.utc).isoformat()),
-                    )
-                    import_id = cursor.lastrowid
-                    await db.commit()
-                finally:
-                    await db.close()
-
-                active_sc_imports[import_id] = {
-                    "playlist_title": ptitle,
-                    "status": "pending",
-                    "total_tracks": 0,
-                    "processed_tracks": 0,
-                    "skipped_tracks": 0,
-                    "error_tracks": 0,
-                    "current_track": None,
-                }
-                background_tasks.add_task(run_sc_import, import_id, pid, ptitle)
-                import_ids.append(import_id)
-
-            return SCImportStatus(
-                import_id=import_ids[0] if import_ids else 0,
-                playlist_title=f"All playlists ({len(import_ids)})",
-                status="importing",
-                total_tracks=0,
-                processed_tracks=0,
-                skipped_tracks=0,
-                error_tracks=0,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    if not playlist_id:
-        raise HTTPException(status_code=400, detail="Provide playlist_url, playlist_id, or user_url")
+    label = req.soundcloud_url
 
     # Create import job
     db = await get_db()
     try:
         cursor = await db.execute(
-            "INSERT INTO soundcloud_imports (playlist_id, playlist_title, playlist_url, status, started_at) VALUES (?, ?, ?, ?, ?)",
-            (playlist_id, playlist_title, playlist_url, "importing", datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO soundcloud_imports (playlist_url, playlist_title, status, started_at) VALUES (?, ?, ?, ?)",
+            (req.soundcloud_url, label, "scraping", datetime.now(timezone.utc).isoformat()),
         )
         import_id = cursor.lastrowid
         await db.commit()
@@ -647,8 +568,8 @@ async def soundcloud_import(req: SCImportRequest, background_tasks: BackgroundTa
         await db.close()
 
     active_sc_imports[import_id] = {
-        "playlist_title": playlist_title,
-        "status": "importing",
+        "label": label,
+        "status": "scraping",
         "total_tracks": 0,
         "processed_tracks": 0,
         "skipped_tracks": 0,
@@ -656,12 +577,12 @@ async def soundcloud_import(req: SCImportRequest, background_tasks: BackgroundTa
         "current_track": None,
     }
 
-    background_tasks.add_task(run_sc_import, import_id, playlist_id, playlist_title)
+    background_tasks.add_task(run_sc_import, import_id, req.soundcloud_url, req.max_items)
 
     return SCImportStatus(
         import_id=import_id,
-        playlist_title=playlist_title,
-        status="importing",
+        label=label,
+        status="scraping",
         total_tracks=0,
         processed_tracks=0,
         skipped_tracks=0,
@@ -684,7 +605,7 @@ async def get_sc_import_status(import_id: int):
             raise HTTPException(status_code=404, detail="Import job not found")
         return SCImportStatus(
             import_id=row["id"],
-            playlist_title=row["playlist_title"],
+            label=row["playlist_title"],
             status=row["status"],
             total_tracks=row["total_tracks"],
             processed_tracks=row["processed_tracks"],
@@ -713,7 +634,7 @@ async def list_sc_imports():
             else:
                 results.append({
                     "import_id": rid,
-                    "playlist_title": row["playlist_title"],
+                    "label": row["playlist_title"],
                     "status": row["status"],
                     "total_tracks": row["total_tracks"],
                     "processed_tracks": row["processed_tracks"],
@@ -727,17 +648,21 @@ async def list_sc_imports():
         await db.close()
 
 
-async def run_sc_import(import_id: int, playlist_id: int, playlist_title: str | None) -> None:
-    """Background task: download + analyze all tracks from a SoundCloud playlist."""
+async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> None:
+    """Background task: scrape SC URL via Apify, download streams, analyze each track."""
     job = active_sc_imports[import_id]
-    job["status"] = "fetching"
+    job["status"] = "scraping"
 
     try:
-        # Get playlist tracks
-        sc_tracks = await get_playlist_tracks(playlist_id)
+        # Run Apify scrape in thread pool (it's synchronous/blocking)
+        loop = asyncio.get_event_loop()
+        sc_tracks = await loop.run_in_executor(
+            None, scrape_soundcloud_url, [soundcloud_url], max_items
+        )
+
         job["total_tracks"] = len(sc_tracks)
-        job["status"] = "importing"
-        logger.info("SC import %d: %d tracks from '%s'", import_id, len(sc_tracks), playlist_title)
+        job["status"] = "analyzing"
+        logger.info("SC import %d: Apify found %d tracks from %s", import_id, len(sc_tracks), soundcloud_url)
 
         # Check which SC tracks are already in DB
         db = await get_db()
@@ -746,16 +671,16 @@ async def run_sc_import(import_id: int, playlist_id: int, playlist_title: str | 
         finally:
             await db.close()
 
-        for sc_track in sc_tracks:
-            meta = parse_sc_track_metadata(sc_track)
-            sc_id = meta["sc_id"]
-            if not sc_id:
+        for sc_item in sc_tracks:
+            meta = parse_sc_track(sc_item)
+            track_id = meta["track_id"]
+            if not track_id:
                 job["error_tracks"] += 1
                 job["processed_tracks"] += 1
                 continue
 
-            fake_path = f"soundcloud://{sc_id}"
-            expected_hash = sc_track_hash(sc_id)
+            fake_path = f"soundcloud://{track_id}"
+            expected_hash = sc_track_hash(track_id)
 
             # Skip if already analyzed
             if fake_path in analyzed and analyzed[fake_path] == expected_hash:
@@ -763,24 +688,19 @@ async def run_sc_import(import_id: int, playlist_id: int, playlist_title: str | 
                 job["processed_tracks"] += 1
                 continue
 
-            job["current_track"] = meta.get("title", f"Track {sc_id}")
-
-            if not meta.get("streamable", False):
-                logger.warning("SC track %d not streamable, skipping", sc_id)
-                job["skipped_tracks"] += 1
-                job["processed_tracks"] += 1
-                continue
+            job["current_track"] = meta.get("title", f"Track {track_id}")
 
             try:
-                # Download
-                local_path = await download_track(sc_id, meta.get("title", ""))
+                # Download stream
+                local_path = await download_stream(
+                    meta["stream_url"], track_id, meta.get("title", "")
+                )
                 if not local_path:
-                    job["error_tracks"] += 1
+                    job["skipped_tracks"] += 1
                     job["processed_tracks"] += 1
                     continue
 
                 # Analyze in thread pool
-                loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(None, analyze_track, local_path, None)
 
                 # Override with SC metadata + use fake path for dedup
@@ -791,8 +711,8 @@ async def run_sc_import(import_id: int, playlist_id: int, playlist_title: str | 
                 track_data["artist"] = meta.get("artist") or track_data.get("artist")
                 if meta.get("genre"):
                     track_data["genre"] = meta["genre"]
-                track_data["folder"] = f"SoundCloud/{playlist_title or 'Imported'}"
-                track_data["filename"] = f"{meta.get('title', f'sc_{sc_id}')}.mp3"
+                track_data["folder"] = "SoundCloud"
+                track_data["filename"] = f"{meta.get('title', f'sc_{track_id}')}.mp3"
 
                 db = await get_db()
                 try:
@@ -803,7 +723,7 @@ async def run_sc_import(import_id: int, playlist_id: int, playlist_title: str | 
                 job["processed_tracks"] += 1
 
             except Exception as e:
-                logger.error("Error processing SC track %d: %s", sc_id, e)
+                logger.error("Error processing SC track %s: %s", track_id, e)
                 job["error_tracks"] += 1
                 job["processed_tracks"] += 1
 

@@ -86,19 +86,9 @@ export interface ArcType {
   description: string;
 }
 
-export interface SCPlaylist {
-  id: number;
-  title: string;
-  track_count: number;
-  duration_ms: number;
-  permalink_url: string;
-  artwork_url: string | null;
-  created_at: string;
-}
-
 export interface SCImportStatus {
   import_id: number;
-  playlist_title: string | null;
+  label: string | null;
   status: string;
   total_tracks: number;
   processed_tracks: number;
@@ -170,23 +160,20 @@ export const api = {
 
   getArcTypes: () => fetcher<{ arc_types: ArcType[] }>("/api/arc-types"),
 
-  // SoundCloud
-  scConnect: (clientId: string, clientSecret: string) =>
+  // SoundCloud (via Apify)
+  scConnect: (apifyToken: string) =>
     fetcher<{ status: string; message: string }>("/api/soundcloud/connect", {
       method: "POST",
-      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+      body: JSON.stringify({ apify_token: apifyToken }),
     }),
 
   scStatus: () =>
-    fetcher<{ connected: boolean; client_id?: string; error?: string }>("/api/soundcloud/status"),
+    fetcher<{ connected: boolean; username?: string; error?: string }>("/api/soundcloud/status"),
 
-  scPlaylists: (userUrl: string) =>
-    fetcher<{ playlists: SCPlaylist[] }>(`/api/soundcloud/playlists?user_url=${encodeURIComponent(userUrl)}`),
-
-  scImport: (params: { playlist_url?: string; playlist_id?: number; user_url?: string }) =>
+  scImport: (soundcloudUrl: string, maxItems?: number) =>
     fetcher<SCImportStatus>("/api/soundcloud/import", {
       method: "POST",
-      body: JSON.stringify(params),
+      body: JSON.stringify({ soundcloud_url: soundcloudUrl, max_items: maxItems ?? 500 }),
     }),
 
   scImportStatus: (importId: number) =>

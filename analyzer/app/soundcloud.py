@@ -1,201 +1,149 @@
-"""SoundCloud integration — fetch playlists, download tracks, run analysis."""
+"""SoundCloud integration via Apify — scrape playlists, download tracks, run analysis."""
 
-import asyncio
 import hashlib
 import logging
 import os
-import tempfile
-from dataclasses import dataclass
+import re
 from pathlib import Path
 
 import httpx
+from apify_client import ApifyClient
 
 logger = logging.getLogger(__name__)
 
-SC_API_BASE = "https://api.soundcloud.com"
-SC_AUTH_URL = "https://secure.soundcloud.com/oauth/token"
-
+APIFY_ACTOR = "crawlergang/soundcloud-scraper"
 DOWNLOAD_DIR = os.path.join(str(Path.home()), ".dj-set-planner", "soundcloud-cache")
 
-
-@dataclass
-class SCCredentials:
-    client_id: str
-    client_secret: str
-    access_token: str | None = None
-    refresh_token: str | None = None
+# Module-level Apify token store
+_apify_token: str | None = None
 
 
-# Module-level credential store (set via API)
-_credentials: SCCredentials | None = None
+def set_apify_token(token: str) -> None:
+    global _apify_token
+    _apify_token = token
 
 
-def set_credentials(client_id: str, client_secret: str) -> None:
-    global _credentials
-    _credentials = SCCredentials(client_id=client_id, client_secret=client_secret)
+def get_apify_token() -> str | None:
+    return _apify_token
 
 
-def get_credentials() -> SCCredentials | None:
-    return _credentials
+def _get_client() -> ApifyClient:
+    token = get_apify_token()
+    if not token:
+        raise ValueError("Apify token not configured")
+    return ApifyClient(token)
 
 
-async def authenticate() -> str:
-    """Get access token via Client Credentials flow (public resources)."""
-    creds = get_credentials()
-    if not creds:
-        raise ValueError("SoundCloud credentials not configured")
+def scrape_soundcloud_url(urls: list[str], max_items: int = 500) -> list[dict]:
+    """Scrape tracks from SoundCloud URLs (playlists, profiles, individual tracks).
 
-    if creds.access_token:
-        return creds.access_token
+    Uses the crawlergang/soundcloud-scraper Apify actor in byUrl mode.
+    Returns list of track dicts with title, artist, genre, streamUrl, etc.
+    """
+    client = _get_client()
+    run_input = {
+        "mode": "byUrl",
+        "startUrls": [{"url": u} for u in urls],
+        "maxItems": max_items,
+    }
+    logger.info("Starting Apify run for %d URLs (max %d items)", len(urls), max_items)
+    run = client.actor(APIFY_ACTOR).call(run_input=run_input)
 
-    import base64
-    encoded = base64.b64encode(f"{creds.client_id}:{creds.client_secret}".encode()).decode()
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            SC_AUTH_URL,
-            headers={
-                "Accept": "application/json; charset=utf-8",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Authorization": f"Basic {encoded}",
-            },
-            data={"grant_type": "client_credentials"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-    creds.access_token = data["access_token"]
-    creds.refresh_token = data.get("refresh_token")
-    return creds.access_token
+    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    # Filter to only tracks (not users/playlists metadata)
+    tracks = [item for item in items if item.get("recordType") == "track" or item.get("trackId")]
+    logger.info("Apify returned %d items, %d tracks", len(items), len(tracks))
+    return tracks
 
 
-async def sc_get(path: str, params: dict | None = None) -> dict:
-    """Authenticated GET to SoundCloud API."""
-    token = await authenticate()
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{SC_API_BASE}{path}",
-            params=params or {},
-            headers={"Authorization": f"OAuth {token}"},
-            follow_redirects=True,
-            timeout=30.0,
-        )
-        if resp.status_code == 401:
-            # Token expired, refresh
-            creds = get_credentials()
-            if creds:
-                creds.access_token = None
-            token = await authenticate()
-            resp = await client.get(
-                f"{SC_API_BASE}{path}",
-                params=params or {},
-                headers={"Authorization": f"OAuth {token}"},
-                follow_redirects=True,
-                timeout=30.0,
-            )
-        resp.raise_for_status()
-        return resp.json()
+def scrape_artist_tracks(artist_url: str, max_items: int = 500) -> list[dict]:
+    """Get all tracks from an artist profile."""
+    client = _get_client()
+    run_input = {
+        "mode": "artistTracks",
+        "artistUrl": artist_url,
+        "maxItems": max_items,
+    }
+    logger.info("Fetching artist tracks: %s", artist_url)
+    run = client.actor(APIFY_ACTOR).call(run_input=run_input)
+
+    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    tracks = [item for item in items if item.get("trackId")]
+    logger.info("Artist tracks: %d items, %d tracks", len(items), len(tracks))
+    return tracks
 
 
-async def resolve_url(url: str) -> dict:
-    """Resolve a SoundCloud URL to an API resource."""
-    return await sc_get("/resolve", {"url": url})
-
-
-async def get_user_playlists(user_url: str) -> list[dict]:
-    """Get all playlists for a user URL like https://soundcloud.com/username."""
-    user = await resolve_url(user_url)
-    user_id = user["id"]
-
-    playlists = []
-    data = await sc_get(f"/users/{user_id}/playlists", {"linked_partitioning": "true", "limit": 50})
-    playlists.extend(data.get("collection", []))
-
-    # Paginate
-    while data.get("next_href"):
-        token = await authenticate()
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                data["next_href"],
-                headers={"Authorization": f"OAuth {token}"},
-                follow_redirects=True,
-                timeout=30.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        playlists.extend(data.get("collection", []))
-
-    return playlists
-
-
-async def get_playlist_tracks(playlist_id: int) -> list[dict]:
-    """Get all tracks in a playlist."""
-    data = await sc_get(f"/playlists/{playlist_id}")
-    return data.get("tracks", [])
-
-
-async def download_track(track_id: int, title: str = "track") -> str | None:
-    """Download a track's stream to local cache. Returns local file path or None."""
+async def download_stream(stream_url: str, track_id: str, title: str = "track") -> str | None:
+    """Download a track's stream URL to local cache. Returns local file path or None."""
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-    # Check cache
-    cache_path = os.path.join(DOWNLOAD_DIR, f"sc_{track_id}.mp3")
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(track_id))
+    cache_path = os.path.join(DOWNLOAD_DIR, f"sc_{safe_id}.mp3")
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1000:
-        logger.info("SoundCloud track %d already cached: %s", track_id, cache_path)
+        logger.info("SC track %s already cached: %s", track_id, cache_path)
         return cache_path
 
-    try:
-        token = await authenticate()
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            # Get stream URL
-            resp = await client.get(
-                f"{SC_API_BASE}/tracks/{track_id}/stream",
-                headers={"Authorization": f"OAuth {token}"},
-            )
-            if resp.status_code == 401:
-                creds = get_credentials()
-                if creds:
-                    creds.access_token = None
-                token = await authenticate()
-                resp = await client.get(
-                    f"{SC_API_BASE}/tracks/{track_id}/stream",
-                    headers={"Authorization": f"OAuth {token}"},
-                    follow_redirects=True,
-                )
+    if not stream_url:
+        logger.warning("No stream URL for track %s (%s)", track_id, title)
+        return None
 
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+            resp = await client.get(stream_url)
             if resp.status_code != 200:
-                logger.warning("Cannot stream track %d (%s): HTTP %d", track_id, title, resp.status_code)
+                logger.warning("Cannot download track %s (%s): HTTP %d", track_id, title, resp.status_code)
                 return None
 
-            # Write to cache
             with open(cache_path, "wb") as f:
                 f.write(resp.content)
 
-            logger.info("Downloaded SC track %d → %s (%d bytes)", track_id, cache_path, len(resp.content))
+            if os.path.getsize(cache_path) < 1000:
+                os.remove(cache_path)
+                logger.warning("Downloaded file too small for track %s, likely not audio", track_id)
+                return None
+
+            logger.info("Downloaded SC track %s → %s (%d bytes)", track_id, cache_path, len(resp.content))
             return cache_path
 
     except Exception as e:
-        logger.error("Failed to download SC track %d: %s", track_id, e)
+        logger.error("Failed to download SC track %s: %s", track_id, e)
         return None
 
 
-def sc_track_hash(track_id: int) -> str:
+def sc_track_hash(track_id: str) -> str:
     """Generate a stable hash for a SoundCloud track."""
     return hashlib.md5(f"soundcloud:{track_id}".encode()).hexdigest()
 
 
-def parse_sc_track_metadata(sc_track: dict) -> dict:
-    """Extract useful metadata from a SoundCloud track API response."""
+def parse_duration_str(dur_str: str | None) -> float:
+    """Parse duration string like '3:45' or '1:02:30' to seconds."""
+    if not dur_str:
+        return 0.0
+    parts = dur_str.split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        else:
+            return float(parts[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def parse_sc_track(sc_item: dict) -> dict:
+    """Extract useful metadata from an Apify SoundCloud scrape result."""
     return {
-        "sc_id": sc_track.get("id"),
-        "title": sc_track.get("title"),
-        "artist": sc_track.get("user", {}).get("username"),
-        "duration_ms": sc_track.get("duration", 0),
-        "genre": sc_track.get("genre") or sc_track.get("tag_list", "").split(" ")[0] or None,
-        "permalink_url": sc_track.get("permalink_url"),
-        "artwork_url": sc_track.get("artwork_url"),
-        "waveform_url": sc_track.get("waveform_url"),
-        "streamable": sc_track.get("streamable", False),
-        "bpm": sc_track.get("bpm"),
-        "key_signature": sc_track.get("key_signature"),
+        "track_id": sc_item.get("trackId", ""),
+        "title": sc_item.get("title", ""),
+        "artist": sc_item.get("artist", ""),
+        "url": sc_item.get("url", ""),
+        "genre": sc_item.get("genre"),
+        "tags": sc_item.get("tags", []),
+        "duration_str": sc_item.get("duration", ""),
+        "duration_sec": parse_duration_str(sc_item.get("duration")),
+        "stream_url": sc_item.get("streamUrl", ""),
+        "artwork_url": sc_item.get("artworkUrl", ""),
+        "play_count": sc_item.get("playCount", 0),
+        "like_count": sc_item.get("likeCount", 0),
     }

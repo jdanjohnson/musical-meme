@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dj-analyzer"
+version = "0.1.0"
+description = "Audio analysis engine for DJ set planning"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "librosa>=0.10.2",
+    "numpy>=1.26.0",
+    "soundfile>=0.12.1",
+    "pydantic>=2.7.0",
+    "aiosqlite>=0.20.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest", "pytest-asyncio"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.setuptools.packages.find]
+where = ["."]

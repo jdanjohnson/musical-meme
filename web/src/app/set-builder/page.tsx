@@ -158,6 +158,87 @@ export default function SetBuilderPage() {
     URL.revokeObjectURL(url);
   }, [setTracks, selectedArc, arcTypes]);
 
+  const handleExportXml = useCallback(() => {
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const indent = (n: number) => "  ".repeat(n);
+
+    const lines: string[] = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<djset',
+      `  generated="${new Date().toISOString()}"`,
+      `  total_tracks="${setTracks.length}"`,
+      `  total_duration_seconds="${Math.round(totalDurationRaw)}"`,
+      `  total_duration_formatted="${formatDuration(totalDurationRaw)}"`,
+      `  arc_type="${esc(selectedArc)}"`,
+    ];
+    if (vibeResult) {
+      lines.push(`  vibe_description="${esc(vibeResult.description)}"`);
+      lines.push(`  vibe_energy_range="${vibeResult.energy_range[0]}-${vibeResult.energy_range[1]}"`);
+      lines.push(`  vibe_bpm_range="${vibeResult.bpm_range[0]}-${vibeResult.bpm_range[1]}"`);
+      lines.push(`  vibe_keywords="${esc(vibeResult.keywords_matched.join(", "))}"`);
+    }
+    lines.push('>');
+
+    for (const st of setTracks) {
+      const t = st.track;
+      const tr = st.transition;
+      lines.push(`${indent(1)}<track position="${st.position}">`);
+      lines.push(`${indent(2)}<title>${esc(t.title || t.filename)}</title>`);
+      lines.push(`${indent(2)}<artist>${esc(t.artist || "Unknown")}</artist>`);
+      lines.push(`${indent(2)}<filename>${esc(t.filename)}</filename>`);
+      lines.push(`${indent(2)}<bpm>${t.bpm?.toFixed(2) || "0"}</bpm>`);
+      lines.push(`${indent(2)}<key musical="${esc(t.key || "")}" camelot="${esc(t.camelot || "")}" />`);
+      lines.push(`${indent(2)}<energy level="${t.energy_level}" raw="${t.energy?.toFixed(4) || "0"}" />`);
+      lines.push(`${indent(2)}<duration seconds="${Math.round(t.duration)}" formatted="${formatDuration(t.duration)}" />`);
+      lines.push(`${indent(2)}<genre>${esc(t.genre || "Unknown")}</genre>`);
+      lines.push(`${indent(2)}<vocals detected="${t.has_vocals}" confidence="${(t.vocal_confidence || 0).toFixed(3)}" />`);
+      lines.push(`${indent(2)}<brightness>${(t.brightness || 0).toFixed(4)}</brightness>`);
+      lines.push(`${indent(2)}<cue_points intro_end="${t.intro_end_sec || 0}" outro_start="${t.outro_start_sec || 0}" phrase_length="${t.phrase_length_sec || 0}" />`);
+      if (t.soundcloud_url) {
+        lines.push(`${indent(2)}<soundcloud_url>${esc(t.soundcloud_url)}</soundcloud_url>`);
+      }
+      if (tr) {
+        lines.push(`${indent(2)}<transition>`);
+        lines.push(`${indent(3)}<harmonic_score>${tr.harmonic_score.toFixed(4)}</harmonic_score>`);
+        lines.push(`${indent(3)}<bpm_score>${tr.bpm_score.toFixed(4)}</bpm_score>`);
+        lines.push(`${indent(3)}<energy_score>${tr.energy_score.toFixed(4)}</energy_score>`);
+        lines.push(`${indent(3)}<overall_score>${tr.overall_score.toFixed(4)}</overall_score>`);
+        lines.push(`${indent(3)}<harmonic_move>${esc(tr.harmonic_move)}</harmonic_move>`);
+        lines.push(`${indent(3)}<bpm_delta>${tr.bpm_delta.toFixed(2)}</bpm_delta>`);
+        lines.push(`${indent(3)}<energy_delta>${tr.energy_delta}</energy_delta>`);
+        lines.push(`${indent(3)}<explanation>${esc(tr.explanation)}</explanation>`);
+        lines.push(`${indent(2)}</transition>`);
+      }
+      lines.push(`${indent(1)}</track>`);
+    }
+
+    // Summary stats for AI assessment
+    const bpms = setTracks.map(st => st.track.bpm).filter(Boolean);
+    const energies = setTracks.map(st => st.track.energy_level).filter(Boolean);
+    const scores = setTracks.map(st => st.transition?.overall_score).filter((s): s is number => s != null);
+    lines.push(`${indent(1)}<summary>`);
+    lines.push(`${indent(2)}<bpm_range min="${Math.min(...bpms).toFixed(1)}" max="${Math.max(...bpms).toFixed(1)}" avg="${(bpms.reduce((a, b) => a + b, 0) / bpms.length).toFixed(1)}" />`);
+    lines.push(`${indent(2)}<energy_range min="${Math.min(...energies)}" max="${Math.max(...energies)}" avg="${(energies.reduce((a, b) => a + b, 0) / energies.length).toFixed(1)}" />`);
+    if (scores.length > 0) {
+      lines.push(`${indent(2)}<transition_scores avg="${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)}" min="${Math.min(...scores).toFixed(4)}" max="${Math.max(...scores).toFixed(4)}" />`);
+    }
+    const keys = setTracks.map(st => st.track.camelot).filter(Boolean);
+    const keyDist: Record<string, number> = {};
+    keys.forEach(k => { keyDist[k] = (keyDist[k] || 0) + 1; });
+    lines.push(`${indent(2)}<key_distribution>${esc(JSON.stringify(keyDist))}</key_distribution>`);
+    lines.push(`${indent(1)}</summary>`);
+
+    lines.push('</djset>');
+
+    const blob = new Blob([lines.join("\n")], { type: "application/xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dj-set-${new Date().toISOString().slice(0, 10)}.xml`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [setTracks, selectedArc, vibeResult, totalDurationRaw]);
+
   const handleExportFolder = useCallback(async () => {
     if (setTracks.length === 0) return;
     setExporting(true);
@@ -284,6 +365,13 @@ export default function SetBuilderPage() {
               >
                 <Download className="w-4 h-4" />
                 Export .txt
+              </button>
+              <button
+                onClick={handleExportXml}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-700/60 hover:bg-blue-600/60 rounded-lg text-sm font-medium text-blue-200 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Export .xml
               </button>
               <button
                 onClick={handleExportFolder}

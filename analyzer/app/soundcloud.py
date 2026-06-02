@@ -1,4 +1,5 @@
 """SoundCloud integration — yt-dlp for playlist discovery & download, Apify as optional metadata enrichment."""
+from __future__ import annotations
 
 import hashlib
 import json

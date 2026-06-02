@@ -1,4 +1,5 @@
 """Music theory engine — Camelot wheel, harmonic compatibility, energy scoring."""
+from __future__ import annotations
 
 from dataclasses import dataclass
 

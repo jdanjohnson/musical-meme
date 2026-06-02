@@ -1,4 +1,5 @@
 """SQLite database for caching audio analysis results."""
+from __future__ import annotations
 
 import aiosqlite
 import json

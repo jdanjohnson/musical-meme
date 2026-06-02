@@ -1,4 +1,5 @@
 """Core audio analysis — BPM, key, energy detection using librosa."""
+from __future__ import annotations
 
 import hashlib
 import logging

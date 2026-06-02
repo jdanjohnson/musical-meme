@@ -1,4 +1,5 @@
 """FastAPI backend — serves library data and runs analysis jobs."""
+from __future__ import annotations
 
 import asyncio
 import json

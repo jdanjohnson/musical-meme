@@ -94,17 +94,32 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
     if (crossfading || currentIndex >= tracks.length - 1) return;
     setCrossfading(true);
 
+    const curTrack = tracks[currentIndex]?.track;
     const nextTrack = tracks[currentIndex + 1]?.track;
     if (!nextTrack) return;
 
-    // Create next audio element
+    // BPM matching: adjust playback rate so both tracks align to a target BPM
+    const curBpm = curTrack?.bpm || 0;
+    const nextBpm = nextTrack?.bpm || 0;
+    let targetBpm = curBpm;
+    if (curBpm && nextBpm) {
+      // Target BPM = midpoint, clamped to ±6% stretch max
+      targetBpm = (curBpm + nextBpm) / 2;
+    }
+
+    const curRate = curBpm && targetBpm ? Math.min(Math.max(targetBpm / curBpm, 0.94), 1.06) : 1;
+    const nextRate = nextBpm && targetBpm ? Math.min(Math.max(targetBpm / nextBpm, 0.94), 1.06) : 1;
+
     const nextAudio = new Audio(audioUrl(nextTrack.id));
     nextAudio.volume = 0;
+    nextAudio.playbackRate = nextRate;
     nextAudioRef.current = nextAudio;
     nextAudio.play().catch(() => {});
 
     const mainAudio = audioRef.current;
-    const steps = CROSSFADE_SECONDS * 10; // 100ms intervals
+    if (mainAudio) mainAudio.playbackRate = curRate;
+
+    const steps = CROSSFADE_SECONDS * 10;
     let step = 0;
 
     crossfadeTimerRef.current = setInterval(() => {
@@ -118,9 +133,13 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
 
       if (step >= steps) {
         if (crossfadeTimerRef.current) clearInterval(crossfadeTimerRef.current);
-        if (mainAudio) mainAudio.pause();
+        if (mainAudio) {
+          mainAudio.pause();
+          mainAudio.playbackRate = 1;
+        }
+        // Reset to normal speed after transition
+        nextAudio.playbackRate = 1;
 
-        // Swap refs
         audioRef.current = nextAudio;
         nextAudioRef.current = null;
         setCurrentIndex((i) => i + 1);

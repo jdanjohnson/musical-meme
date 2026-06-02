@@ -6,7 +6,7 @@ import type { SetTrack } from "@/lib/api";
 import { CAMELOT_COLORS, formatDuration } from "@/lib/camelot";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const CROSSFADE_SECONDS = 8;
+const DEFAULT_CROSSFADE_SECONDS = 8;
 
 interface SetPlayerProps {
   tracks: SetTrack[];
@@ -24,6 +24,11 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const nextAudioRef = useRef<HTMLAudioElement | null>(null);
   const crossfadeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Flag to prevent onEnded from advancing when crossfade already did
+  const crossfadeHandledRef = useRef(false);
+  // Track which index the current audioRef corresponds to, to prevent
+  // the load-effect from re-setting src after a crossfade swap
+  const loadedIndexRef = useRef(-1);
 
   const currentTrack = tracks[currentIndex]?.track;
 
@@ -32,29 +37,53 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
     []
   );
 
-  // Load track when index changes
+  // Get crossfade duration based on track's outro/phrase data
+  const getCrossfadeDuration = useCallback(
+    (track: SetTrack["track"]) => {
+      const phrase = track.phrase_length_sec;
+      if (phrase && phrase > 4 && phrase < 30) return phrase;
+      return DEFAULT_CROSSFADE_SECONDS;
+    },
+    []
+  );
+
+  // Get outro start time (where we begin crossfading out)
+  const getOutroStart = useCallback(
+    (track: SetTrack["track"], audioDuration: number) => {
+      const outro = track.outro_start_sec;
+      if (outro && outro > 0 && outro < audioDuration) return outro;
+      return Math.max(0, audioDuration - getCrossfadeDuration(track));
+    },
+    [getCrossfadeDuration]
+  );
+
+  // Load track when index changes — but skip if crossfade already loaded it
   useEffect(() => {
     if (!currentTrack) return;
+    if (loadedIndexRef.current === currentIndex) return; // already loaded by crossfade
     const audio = audioRef.current;
     if (!audio) return;
 
     audio.src = audioUrl(currentTrack.id);
     audio.volume = muted ? 0 : volume;
+    audio.playbackRate = 1;
     audio.load();
+    loadedIndexRef.current = currentIndex;
+    crossfadeHandledRef.current = false;
 
     if (isPlaying) {
       audio.play().catch(() => {});
     }
   }, [currentIndex, currentTrack]);
 
-  // Update volume
+  // Update volume on active audio
   useEffect(() => {
-    if (audioRef.current) {
+    if (audioRef.current && !crossfading) {
       audioRef.current.volume = muted ? 0 : volume;
     }
-  }, [volume, muted]);
+  }, [volume, muted, crossfading]);
 
-  // Time update
+  // Time update + crossfade trigger + ended handler
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -63,19 +92,22 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
       setCurrentTime(audio.currentTime);
       setDuration(audio.duration || 0);
 
-      // Start crossfade near end
-      if (
-        audio.duration &&
-        audio.currentTime > audio.duration - CROSSFADE_SECONDS &&
-        currentIndex < tracks.length - 1 &&
-        !crossfading
-      ) {
+      if (!audio.duration || currentIndex >= tracks.length - 1 || crossfading) return;
+
+      const outroStart = getOutroStart(currentTrack!, audio.duration);
+      if (audio.currentTime >= outroStart) {
         startCrossfade();
       }
     };
 
     const onEnded = () => {
+      // If crossfade already handled the transition, don't advance again
+      if (crossfadeHandledRef.current) {
+        crossfadeHandledRef.current = false;
+        return;
+      }
       if (currentIndex < tracks.length - 1) {
+        loadedIndexRef.current = -1; // force reload for non-crossfade advance
         setCurrentIndex((i) => i + 1);
       } else {
         setIsPlaying(false);
@@ -88,7 +120,7 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
       audio.removeEventListener("timeupdate", onTimeUpdate);
       audio.removeEventListener("ended", onEnded);
     };
-  }, [currentIndex, tracks.length, crossfading]);
+  }, [currentIndex, tracks.length, crossfading, currentTrack]);
 
   const startCrossfade = useCallback(() => {
     if (crossfading || currentIndex >= tracks.length - 1) return;
@@ -98,18 +130,19 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
     const nextTrack = tracks[currentIndex + 1]?.track;
     if (!nextTrack) return;
 
-    // BPM matching: adjust playback rate so both tracks align to a target BPM
+    const crossfadeDur = getCrossfadeDuration(curTrack!);
+
+    // BPM matching: adjust playback rate so both tracks align to a midpoint BPM
     const curBpm = curTrack?.bpm || 0;
     const nextBpm = nextTrack?.bpm || 0;
     let targetBpm = curBpm;
     if (curBpm && nextBpm) {
-      // Target BPM = midpoint, clamped to ±6% stretch max
       targetBpm = (curBpm + nextBpm) / 2;
     }
-
     const curRate = curBpm && targetBpm ? Math.min(Math.max(targetBpm / curBpm, 0.94), 1.06) : 1;
     const nextRate = nextBpm && targetBpm ? Math.min(Math.max(targetBpm / nextBpm, 0.94), 1.06) : 1;
 
+    // Start the next track at its intro point
     const nextAudio = new Audio(audioUrl(nextTrack.id));
     nextAudio.volume = 0;
     nextAudio.playbackRate = nextRate;
@@ -119,34 +152,50 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
     const mainAudio = audioRef.current;
     if (mainAudio) mainAudio.playbackRate = curRate;
 
-    const steps = CROSSFADE_SECONDS * 10;
+    const steps = Math.round(crossfadeDur * 10); // 100ms intervals
     let step = 0;
+    const vol = muted ? 0 : volume;
 
     crossfadeTimerRef.current = setInterval(() => {
       step++;
       const progress = step / steps;
 
+      // Equal-power crossfade curve
+      const fadeOut = Math.cos(progress * Math.PI * 0.5);
+      const fadeIn = Math.sin(progress * Math.PI * 0.5);
+
       if (mainAudio) {
-        mainAudio.volume = Math.max(0, (1 - progress) * (muted ? 0 : volume));
+        mainAudio.volume = Math.max(0, fadeOut * vol);
       }
-      nextAudio.volume = progress * (muted ? 0 : volume);
+      nextAudio.volume = fadeIn * vol;
 
       if (step >= steps) {
         if (crossfadeTimerRef.current) clearInterval(crossfadeTimerRef.current);
+
+        // Stop old track and mark that crossfade handled the advance
         if (mainAudio) {
           mainAudio.pause();
           mainAudio.playbackRate = 1;
+          mainAudio.removeAttribute("src");
+          mainAudio.load(); // release resources
         }
-        // Reset to normal speed after transition
-        nextAudio.playbackRate = 1;
+        crossfadeHandledRef.current = true;
 
+        // Reset to normal speed
+        nextAudio.playbackRate = 1;
+        nextAudio.volume = muted ? 0 : volume;
+
+        // Swap: nextAudio becomes the current audio
         audioRef.current = nextAudio;
         nextAudioRef.current = null;
-        setCurrentIndex((i) => i + 1);
+
+        const nextIdx = currentIndex + 1;
+        loadedIndexRef.current = nextIdx;
+        setCurrentIndex(nextIdx);
         setCrossfading(false);
       }
     }, 100);
-  }, [crossfading, currentIndex, tracks, volume, muted, audioUrl]);
+  }, [crossfading, currentIndex, tracks, volume, muted, audioUrl, getCrossfadeDuration]);
 
   // Cleanup
   useEffect(() => {
@@ -179,6 +228,8 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
       }
       nextAudioRef.current?.pause();
       nextAudioRef.current = null;
+      crossfadeHandledRef.current = false;
+      loadedIndexRef.current = -1; // force reload
       setCurrentIndex(index);
     },
     [tracks.length]
@@ -209,7 +260,9 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
           Set Preview Player
         </h2>
         {crossfading && (
-          <span className="text-xs text-purple-400 animate-pulse">Crossfading...</span>
+          <span className="text-xs text-purple-400 animate-pulse">
+            Crossfading · BPM matched
+          </span>
         )}
       </div>
 

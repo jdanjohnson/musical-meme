@@ -38,6 +38,11 @@ export interface Track {
   sample_rate: number;
   channels: number;
   soundcloud_url: string | null;
+  has_vocals: boolean;
+  vocal_confidence: number;
+  intro_end_sec: number;
+  outro_start_sec: number;
+  phrase_length_sec: number;
 }
 
 export interface TransitionScore {

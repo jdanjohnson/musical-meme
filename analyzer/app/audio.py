@@ -85,6 +85,9 @@ class AnalysisResult:
     brightness: float
     has_vocals: bool
     vocal_confidence: float
+    intro_end_sec: float
+    outro_start_sec: float
+    phrase_length_sec: float
     format: str
     sample_rate: int
     channels: int
@@ -259,6 +262,67 @@ def detect_vocals(y: np.ndarray, sr: int) -> tuple[bool, float]:
     return has_vocals, confidence
 
 
+def detect_transition_points(y: np.ndarray, sr: int, bpm: float) -> dict:
+    """Detect intro/outro cue points for DJ transitions.
+
+    Finds where the track's energy settles in (end of intro) and where it
+    begins to drop off (start of outro). Uses beat-aligned phrase boundaries
+    (every 16 beats) so transitions land on musically natural points.
+
+    Returns {intro_end_sec, outro_start_sec, phrase_length_sec, beat_times}.
+    """
+    if bpm <= 0:
+        bpm = 120.0
+
+    beat_dur = 60.0 / bpm
+    phrase_beats = 16
+    phrase_dur = beat_dur * phrase_beats
+
+    duration = librosa.get_duration(y=y, sr=sr)
+
+    # Compute energy envelope in ~0.5s windows
+    hop = int(sr * 0.5)
+    rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+    if len(rms) == 0:
+        return {"intro_end_sec": 0, "outro_start_sec": duration, "phrase_length_sec": phrase_dur}
+
+    # Normalize
+    rms_norm = rms / (np.max(rms) + 1e-8)
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop)
+
+    # Threshold: where energy first consistently exceeds 40% of peak = intro end
+    threshold = 0.4
+    intro_end = 0.0
+    for i, val in enumerate(rms_norm):
+        if val >= threshold:
+            intro_end = times[i]
+            break
+
+    # Snap to nearest phrase boundary
+    if phrase_dur > 0:
+        intro_end = max(phrase_dur, round(intro_end / phrase_dur) * phrase_dur)
+
+    # Outro: where energy last exceeds 40% of peak
+    outro_start = duration
+    for i in range(len(rms_norm) - 1, -1, -1):
+        if rms_norm[i] >= threshold:
+            outro_start = times[i]
+            break
+
+    # Snap to phrase boundary
+    if phrase_dur > 0:
+        outro_start = min(duration - phrase_dur, round(outro_start / phrase_dur) * phrase_dur)
+
+    # Ensure valid range
+    outro_start = max(outro_start, intro_end + phrase_dur)
+
+    return {
+        "intro_end_sec": round(intro_end, 2),
+        "outro_start_sec": round(outro_start, 2),
+        "phrase_length_sec": round(phrase_dur, 2),
+    }
+
+
 def infer_genre_from_path(filepath: str, root_folder: str | None = None) -> str | None:
     """Infer genre from folder structure.
 
@@ -320,6 +384,9 @@ def analyze_track(filepath: str, root_folder: str | None = None) -> AnalysisResu
     # Vocal detection
     has_vocals, vocal_confidence = detect_vocals(y, sr)
 
+    # Transition points (intro/outro cue points)
+    cue_points = detect_transition_points(y, sr, bpm)
+
     # Genre from folder
     genre = infer_genre_from_path(filepath, root_folder)
 
@@ -343,6 +410,9 @@ def analyze_track(filepath: str, root_folder: str | None = None) -> AnalysisResu
         brightness=brightness,
         has_vocals=has_vocals,
         vocal_confidence=round(vocal_confidence, 3),
+        intro_end_sec=cue_points["intro_end_sec"],
+        outro_start_sec=cue_points["outro_start_sec"],
+        phrase_length_sec=cue_points["phrase_length_sec"],
         format=path.suffix.lstrip(".").upper(),
         sample_rate=sample_rate,
         channels=channels,

@@ -80,6 +80,7 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                   <span className="flex items-center gap-1">Genre <SortIcon col="genre" /></span>
                 </th>
               )}
+              {!compact && <th className="text-center px-3 py-2">Mood</th>}
               <th className="text-center px-3 py-2 cursor-pointer hover:text-purple-300" onClick={() => handleSort("bpm")}>
                 <span className="flex items-center gap-1 justify-center">BPM <SortIcon col="bpm" /></span>
               </th>
@@ -122,7 +123,22 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                     )}
                   </td>
                   {!compact && (
-                    <td className="px-3 py-2 text-zinc-400 text-xs">{track.genre || "—"}</td>
+                    <td className="px-3 py-2 text-zinc-400 text-xs">
+                      {track.ai_genre ? (
+                        <span title={`Folder: ${track.genre || "—"} | Confidence: ${((track.ai_genre_confidence || 0) * 100).toFixed(0)}%`}>
+                          {track.ai_genre}
+                        </span>
+                      ) : (track.genre || "—")}
+                    </td>
+                  )}
+                  {!compact && (
+                    <td className="px-3 py-2 text-center">
+                      {track.mood_primary ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-indigo-500/20 text-indigo-300" title={`V:${(track.mood_valence||0).toFixed(2)} A:${(track.mood_arousal||0).toFixed(2)} T:${(track.mood_tension||0).toFixed(2)}`}>
+                          {track.mood_primary}
+                        </span>
+                      ) : "—"}
+                    </td>
                   )}
                   <td className="px-3 py-2 text-center font-mono text-xs">{track.bpm?.toFixed(1)}</td>
                   <td className="px-3 py-2 text-center">

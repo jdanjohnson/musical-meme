@@ -315,7 +315,11 @@ def score_transition(
     arc_type: str = "standard",
     bpm_max_delta: float = 8.0,
 ) -> TransitionScore:
-    """Score a transition between two tracks on all dimensions."""
+    """Score a transition between two tracks on all dimensions.
+
+    When AI intelligence data is available (embeddings, mood), incorporates
+    sonic compatibility into the overall score for better-sounding transitions.
+    """
     # Harmonic
     h_score, h_move = harmonic_relationship(
         track_a.get("camelot", ""), track_b.get("camelot", "")
@@ -336,14 +340,49 @@ def score_transition(
 
     energy_delta = (track_b.get("energy_level", 5) - track_a.get("energy_level", 5))
 
-    # Weighted overall
-    overall = 0.45 * h_score + 0.25 * b_score + 0.30 * e_score
+    # AI sonic compatibility (if embeddings available)
+    sonic_score = 0.0
+    sonic_explanation = ""
+    has_sonic = False
+    emb_a = track_a.get("audio_embedding")
+    emb_b = track_b.get("audio_embedding")
+    if emb_a and emb_b:
+        try:
+            import json as _json
+            from app.intelligence import score_sonic_compatibility
+            ea = _json.loads(emb_a) if isinstance(emb_a, str) else emb_a
+            eb = _json.loads(emb_b) if isinstance(emb_b, str) else emb_b
+            mood_a = {
+                "valence": track_a.get("mood_valence", 0),
+                "arousal": track_a.get("mood_arousal", 0),
+                "tension": track_a.get("mood_tension", 0),
+                "warmth": track_a.get("mood_warmth", 0),
+            }
+            mood_b = {
+                "valence": track_b.get("mood_valence", 0),
+                "arousal": track_b.get("mood_arousal", 0),
+                "tension": track_b.get("mood_tension", 0),
+                "warmth": track_b.get("mood_warmth", 0),
+            }
+            if ea and eb:
+                sonic_score, sonic_explanation = score_sonic_compatibility(ea, eb, mood_a, mood_b)
+                has_sonic = True
+        except Exception:
+            pass
+
+    # Weighted overall — include sonic score when available
+    if has_sonic:
+        overall = 0.30 * h_score + 0.15 * b_score + 0.25 * e_score + 0.30 * sonic_score
+    else:
+        overall = 0.45 * h_score + 0.25 * b_score + 0.30 * e_score
 
     # Build explanation
     parts = [h_move]
     if bpm_delta > 0:
         parts.append(f"BPM: {track_a.get('bpm', '?')}→{track_b.get('bpm', '?')} (Δ{bpm_delta:.1f})")
     parts.append(e_explanation)
+    if sonic_explanation:
+        parts.append(sonic_explanation)
 
     return TransitionScore(
         harmonic_score=round(h_score, 2),
@@ -599,12 +638,57 @@ def score_track_vibe(track: dict, vibe: dict) -> float:
         score += 0.15 * (score / max(0.01, weights))
         weights += 0.15
 
-    # Brightness/mood bonus (10% weight)
-    brightness = track.get("brightness", 0.5)
-    # Higher energy vibes pair with brighter tracks
-    target_brightness = (e_lo + e_hi) / 20  # 0-1 scale
-    bright_match = 1 - abs(brightness - target_brightness)
-    score += 0.1 * max(0, bright_match)
+    # Mood-aware scoring (10% weight) — uses AI mood when available
+    mood_primary = track.get("mood_primary", "")
+    mood_valence = track.get("mood_valence", 0)
+    mood_arousal = track.get("mood_arousal", 0)
+
+    if mood_primary:
+        # Map vibe keywords to expected mood attributes
+        desc_lower = vibe.get("raw", "").lower()
+        mood_bonus = 0.0
+        # Dark vibes should match dark/aggressive/hypnotic moods
+        if any(w in desc_lower for w in ("dark", "underground", "afterhours", "after hours", "late night")):
+            if mood_primary in ("dark", "aggressive", "hypnotic"):
+                mood_bonus = 1.0
+            elif mood_valence < -0.2:
+                mood_bonus = 0.6
+        # Euphoric/happy vibes should match euphoric/uplifting moods
+        elif any(w in desc_lower for w in ("euphoric", "happy", "joyful", "uplifting", "pride")):
+            if mood_primary in ("euphoric", "uplifting", "energetic"):
+                mood_bonus = 1.0
+            elif mood_valence > 0.3:
+                mood_bonus = 0.6
+        # Chill/relaxed vibes
+        elif any(w in desc_lower for w in ("chill", "relax", "calm", "mellow", "sunset", "lounge")):
+            if mood_primary in ("chill", "dreamy", "melancholic"):
+                mood_bonus = 1.0
+            elif mood_arousal < -0.1:
+                mood_bonus = 0.6
+        # Groovy/funky vibes
+        elif any(w in desc_lower for w in ("groovy", "funky", "disco", "sexy", "groove")):
+            if mood_primary in ("groovy", "energetic"):
+                mood_bonus = 1.0
+            elif mood_valence > 0 and mood_arousal > 0:
+                mood_bonus = 0.5
+        # Intense/driving vibes
+        elif any(w in desc_lower for w in ("intense", "driving", "hard", "peak", "banger")):
+            if mood_primary in ("energetic", "aggressive"):
+                mood_bonus = 1.0
+            elif mood_arousal > 0.3:
+                mood_bonus = 0.6
+        else:
+            # Generic: reward tracks whose arousal matches energy target
+            target_arousal = (e_lo + e_hi - 10) / 10  # map 1-10 to -1..1
+            mood_bonus = max(0, 1 - abs(mood_arousal - target_arousal))
+
+        score += 0.1 * mood_bonus
+    else:
+        # Fallback: brightness-based scoring
+        brightness = track.get("brightness", 0.5)
+        target_brightness = (e_lo + e_hi) / 20
+        bright_match = 1 - abs(brightness - target_brightness)
+        score += 0.1 * max(0, bright_match)
 
     return min(1.0, score)
 

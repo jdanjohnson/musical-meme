@@ -196,6 +196,22 @@ export default function SetBuilderPage() {
       lines.push(`${indent(2)}<vocals detected="${t.has_vocals}" confidence="${(t.vocal_confidence || 0).toFixed(3)}" />`);
       lines.push(`${indent(2)}<brightness>${(t.brightness || 0).toFixed(4)}</brightness>`);
       lines.push(`${indent(2)}<cue_points intro_end="${t.intro_end_sec || 0}" outro_start="${t.outro_start_sec || 0}" phrase_length="${t.phrase_length_sec || 0}" />`);
+      if (t.ai_genre) {
+        lines.push(`${indent(2)}<ai_genre name="${esc(t.ai_genre)}" confidence="${(t.ai_genre_confidence || 0).toFixed(3)}" />`);
+      }
+      if (t.mood_primary) {
+        lines.push(`${indent(2)}<mood primary="${esc(t.mood_primary)}" valence="${(t.mood_valence || 0).toFixed(3)}" arousal="${(t.mood_arousal || 0).toFixed(3)}" tension="${(t.mood_tension || 0).toFixed(3)}" warmth="${(t.mood_warmth || 0).toFixed(3)}" />`);
+        if (t.mood_tags) {
+          try { lines.push(`${indent(2)}<mood_tags>${esc(JSON.parse(t.mood_tags).join(", "))}</mood_tags>`); } catch {}
+        }
+      }
+      if (t.structure_drops || t.structure_breakdowns || t.structure_builds) {
+        lines.push(`${indent(2)}<structure>`);
+        try { const d = JSON.parse(t.structure_drops || "[]"); if (d.length) lines.push(`${indent(3)}<drops>${d.join(", ")}</drops>`); } catch {}
+        try { const b = JSON.parse(t.structure_breakdowns || "[]"); if (b.length) lines.push(`${indent(3)}<breakdowns>${b.join(", ")}</breakdowns>`); } catch {}
+        try { const b = JSON.parse(t.structure_builds || "[]"); if (b.length) lines.push(`${indent(3)}<builds>${b.join(", ")}</builds>`); } catch {}
+        lines.push(`${indent(2)}</structure>`);
+      }
       if (t.soundcloud_url) {
         lines.push(`${indent(2)}<soundcloud_url>${esc(t.soundcloud_url)}</soundcloud_url>`);
       }

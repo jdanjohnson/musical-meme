@@ -158,6 +158,24 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE tracks ADD COLUMN phrase_length_sec REAL DEFAULT 0")
             await db.commit()
 
+        # AI intelligence columns
+        try:
+            await db.execute("SELECT ai_genre FROM tracks LIMIT 1")
+        except Exception:
+            await db.execute("ALTER TABLE tracks ADD COLUMN ai_genre TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN ai_genre_confidence REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_primary TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_valence REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_arousal REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_tension REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_warmth REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_tags TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN audio_embedding TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN structure_drops TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN structure_breakdowns TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN structure_builds TEXT")
+            await db.commit()
+
         await db.commit()
     finally:
         await db.close()

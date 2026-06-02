@@ -43,6 +43,19 @@ export interface Track {
   intro_end_sec: number;
   outro_start_sec: number;
   phrase_length_sec: number;
+  // AI intelligence
+  ai_genre: string | null;
+  ai_genre_confidence: number;
+  mood_primary: string | null;
+  mood_valence: number;
+  mood_arousal: number;
+  mood_tension: number;
+  mood_warmth: number;
+  mood_tags: string | null;
+  audio_embedding: string | null;
+  structure_drops: string | null;
+  structure_breakdowns: string | null;
+  structure_builds: string | null;
 }
 
 export interface TransitionScore {

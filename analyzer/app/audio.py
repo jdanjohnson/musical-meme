@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -93,6 +94,19 @@ class AnalysisResult:
     channels: int
     analyzed_at: str
     file_modified_at: str
+    # AI intelligence fields
+    ai_genre: str | None = None
+    ai_genre_confidence: float = 0.0
+    mood_primary: str | None = None
+    mood_valence: float = 0.0
+    mood_arousal: float = 0.0
+    mood_tension: float = 0.0
+    mood_warmth: float = 0.0
+    mood_tags: str | None = None  # JSON
+    audio_embedding: str | None = None  # JSON
+    structure_drops: str | None = None  # JSON
+    structure_breakdowns: str | None = None  # JSON
+    structure_builds: str | None = None  # JSON
 
     def to_dict(self) -> dict:
         return self.__dict__
@@ -536,8 +550,18 @@ def analyze_track(filepath: str, root_folder: str | None = None) -> AnalysisResu
     # Transition points (intro/outro cue points)
     cue_points = detect_transition_points(y, sr, bpm)
 
-    # Genre from folder
+    # Genre from folder (fallback)
     genre = infer_genre_from_path(filepath, root_folder)
+
+    # AI Intelligence analysis
+    from app.intelligence import analyze_intelligence
+    try:
+        intel = analyze_intelligence(
+            y, sr, bpm, brightness, energy_level, has_vocals, key_name
+        )
+    except Exception as e:
+        logger.warning("AI intelligence analysis failed for %s: %s", filepath, e)
+        intel = {}
 
     return AnalysisResult(
         file_path=filepath,
@@ -567,4 +591,17 @@ def analyze_track(filepath: str, root_folder: str | None = None) -> AnalysisResu
         channels=channels,
         analyzed_at=datetime.now(timezone.utc).isoformat(),
         file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        # AI intelligence
+        ai_genre=intel.get("ai_genre"),
+        ai_genre_confidence=intel.get("ai_genre_confidence", 0.0),
+        mood_primary=intel.get("mood", {}).get("primary"),
+        mood_valence=intel.get("mood", {}).get("valence", 0.0),
+        mood_arousal=intel.get("mood", {}).get("arousal", 0.0),
+        mood_tension=intel.get("mood", {}).get("tension", 0.0),
+        mood_warmth=intel.get("mood", {}).get("warmth", 0.0),
+        mood_tags=json.dumps(intel.get("mood", {}).get("tags", [])),
+        audio_embedding=json.dumps(intel.get("embedding", [])),
+        structure_drops=json.dumps(intel.get("structure", {}).get("drops", [])),
+        structure_breakdowns=json.dumps(intel.get("structure", {}).get("breakdowns", [])),
+        structure_builds=json.dumps(intel.get("structure", {}).get("builds", [])),
     )

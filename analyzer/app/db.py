@@ -127,6 +127,13 @@ async def init_db() -> None:
                 completed_at TEXT,
                 error_message TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS deleted_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT UNIQUE NOT NULL,
+                filename TEXT,
+                deleted_at TEXT NOT NULL
+            );
         """)
         # Migrations — add columns if missing
         try:
@@ -199,3 +206,20 @@ async def get_analyzed_paths(db: aiosqlite.Connection) -> dict[str, str]:
     cursor = await db.execute("SELECT file_path, file_hash FROM tracks")
     rows = await cursor.fetchall()
     return {row["file_path"]: row["file_hash"] for row in rows}
+
+
+async def add_to_skip_list(db: aiosqlite.Connection, file_path: str, filename: str) -> None:
+    """Record a deleted track so it won't be re-analyzed on future scans."""
+    from datetime import datetime, timezone
+    await db.execute(
+        "INSERT OR IGNORE INTO deleted_tracks (file_path, filename, deleted_at) VALUES (?, ?, ?)",
+        (file_path, filename, datetime.now(timezone.utc).isoformat()),
+    )
+    await db.commit()
+
+
+async def get_skip_list(db: aiosqlite.Connection) -> set[str]:
+    """Return set of file paths that should be skipped during scans."""
+    cursor = await db.execute("SELECT file_path FROM deleted_tracks")
+    rows = await cursor.fetchall()
+    return {row["file_path"] for row in rows}

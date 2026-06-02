@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.db import init_db, get_db, upsert_track, get_all_tracks, get_track_by_id, get_tracks_by_ids, get_analyzed_paths
+from app.db import init_db, get_db, upsert_track, get_all_tracks, get_track_by_id, get_tracks_by_ids, get_analyzed_paths, add_to_skip_list, get_skip_list
 from app.audio import scan_folder, analyze_track, file_hash
 from app.theory import (
     score_transition,
@@ -203,15 +203,22 @@ async def run_scan(job_id: int, folder_path: str) -> None:
         job["status"] = "analyzing"
         logger.info("Found %d audio files in %s", len(files), folder_path)
 
-        # Get already-analyzed files
+        # Get already-analyzed files and skip list
         db = await get_db()
         try:
             analyzed = await get_analyzed_paths(db)
+            skip_paths = await get_skip_list(db)
         finally:
             await db.close()
 
         for filepath in files:
             try:
+                # Skip deleted tracks
+                if filepath in skip_paths:
+                    job["skipped_files"] += 1
+                    job["processed_files"] += 1
+                    continue
+
                 # Check if already analyzed with same hash
                 current_hash = file_hash(filepath)
                 if filepath in analyzed and analyzed[filepath] == current_hash:
@@ -300,12 +307,14 @@ async def get_track(track_id: int):
 
 @app.delete("/api/tracks/{track_id}")
 async def delete_track(track_id: int):
-    """Delete a track from the library."""
+    """Delete a track from the library and add to skip list."""
     db = await get_db()
     try:
         track = await get_track_by_id(db, track_id)
         if not track:
             raise HTTPException(status_code=404, detail="Track not found")
+        # Add to skip list so future scans don't re-import it
+        await add_to_skip_list(db, track.get("file_path", ""), track.get("filename", ""))
         await db.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
         await db.commit()
         return {"deleted": True, "id": track_id}
@@ -391,6 +400,7 @@ async def clean_duplicates():
             best = max(group, key=lambda t: t.get("duration", 0))
             for t in group:
                 if t["id"] != best["id"]:
+                    await add_to_skip_list(db, t.get("file_path", ""), t.get("filename", ""))
                     await db.execute("DELETE FROM tracks WHERE id = ?", (t["id"],))
                     deleted_ids.append(t["id"])
 
@@ -948,10 +958,11 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
         job["status"] = "analyzing"
         logger.info("SC import %d: yt-dlp discovered %d tracks from %s", import_id, len(discovered), soundcloud_url)
 
-        # Check which SC tracks are already in DB
+        # Check which SC tracks are already in DB + skip list
         db = await get_db()
         try:
             analyzed = await get_analyzed_paths(db)
+            skip_paths = await get_skip_list(db)
         finally:
             await db.close()
 
@@ -965,6 +976,12 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
 
             fake_path = f"soundcloud://{track_id}"
             expected_hash = sc_track_hash(track_id)
+
+            # Skip if user previously deleted this track
+            if fake_path in skip_paths:
+                job["skipped_tracks"] += 1
+                job["processed_tracks"] += 1
+                continue
 
             # Skip if already analyzed
             if fake_path in analyzed and analyzed[fake_path] == expected_hash:

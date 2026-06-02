@@ -8,6 +8,7 @@ import {
   ListMusic,
   Wand2,
   FolderSearch,
+  Cloud,
   Settings,
 } from "lucide-react";
 
@@ -16,6 +17,7 @@ const NAV_ITEMS = [
   { href: "/library", label: "Library", icon: ListMusic },
   { href: "/set-builder", label: "Set Builder", icon: Wand2 },
   { href: "/scan", label: "Scan Library", icon: FolderSearch },
+  { href: "/soundcloud", label: "SoundCloud", icon: Cloud },
 ];
 
 export function Sidebar() {

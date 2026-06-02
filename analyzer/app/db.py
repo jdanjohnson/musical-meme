@@ -68,6 +68,22 @@ async def init_db() -> None:
                 user_notes TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS soundcloud_imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER,
+                playlist_title TEXT,
+                playlist_url TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                total_tracks INTEGER DEFAULT 0,
+                processed_tracks INTEGER DEFAULT 0,
+                skipped_tracks INTEGER DEFAULT 0,
+                error_tracks INTEGER DEFAULT 0,
+                current_track TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                error_message TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_tracks_camelot ON tracks(camelot);
             CREATE INDEX IF NOT EXISTS idx_tracks_bpm ON tracks(bpm);
             CREATE INDEX IF NOT EXISTS idx_tracks_energy ON tracks(energy_level);

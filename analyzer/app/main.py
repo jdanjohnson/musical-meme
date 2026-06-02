@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.db import init_db, get_db, upsert_track, get_all_tracks, get_track_by_id, get_tracks_by_ids, get_analyzed_paths
@@ -292,6 +293,30 @@ async def get_track(track_id: int):
         return track
     finally:
         await db.close()
+
+
+@app.get("/api/tracks/{track_id}/audio")
+async def stream_track_audio(track_id: int):
+    """Serve audio file for in-browser playback."""
+    db = await get_db()
+    try:
+        track = await get_track_by_id(db, track_id)
+    finally:
+        await db.close()
+
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    file_path = track.get("file_path", "")
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Audio file not found on disk")
+
+    ext = os.path.splitext(file_path)[1].lower()
+    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+                   ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".opus": "audio/opus"}
+    media_type = media_types.get(ext, "audio/mpeg")
+
+    return FileResponse(file_path, media_type=media_type, filename=os.path.basename(file_path))
 
 
 @app.get("/api/stats")
@@ -591,6 +616,60 @@ async def export_set(params: dict[str, Any]):
             (st["track"].get("duration") or 0) / 60 for st in set_tracks
         ),
         "arc_type": arc,
+    }
+
+
+@app.post("/api/export-set-folder")
+async def export_set_folder(params: dict[str, Any]):
+    """Copy set tracks into a numbered folder ready for Rekordbox import."""
+    import shutil
+
+    track_ids = params.get("track_ids", [])
+    export_name = params.get("name", "DJ Set")
+
+    if not track_ids:
+        raise HTTPException(status_code=400, detail="No track IDs provided")
+
+    db = await get_db()
+    try:
+        tracks = await get_tracks_by_ids(db, track_ids)
+    finally:
+        await db.close()
+
+    # Build ordered lookup
+    id_to_track = {t["id"]: t for t in tracks}
+    ordered = [id_to_track[tid] for tid in track_ids if tid in id_to_track]
+
+    if not ordered:
+        raise HTTPException(status_code=400, detail="No valid tracks found")
+
+    # Create export folder on desktop or home
+    home = os.path.expanduser("~")
+    export_dir = os.path.join(home, "DJ Sets", export_name)
+    os.makedirs(export_dir, exist_ok=True)
+
+    copied = []
+    for i, track in enumerate(ordered, 1):
+        src = track.get("file_path", "")
+        if not src or not os.path.isfile(src):
+            continue
+
+        ext = os.path.splitext(src)[1]
+        title = track.get("title") or track.get("filename", "Unknown")
+        # Sanitize filename
+        safe_title = "".join(c for c in title if c.isalnum() or c in " -_().").strip()
+        bpm = track.get("bpm", 0)
+        key = track.get("camelot", "")
+        dest_name = f"{i:02d} - {safe_title} ({bpm:.0f} BPM, {key}){ext}"
+        dest = os.path.join(export_dir, dest_name)
+
+        shutil.copy2(src, dest)
+        copied.append({"position": i, "filename": dest_name, "title": title})
+
+    return {
+        "export_path": export_dir,
+        "tracks_copied": len(copied),
+        "tracks": copied,
     }
 
 

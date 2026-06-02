@@ -230,4 +230,12 @@ export const api = {
       total_duration_minutes: number;
       arc_type: string;
     }>("/api/export-set", { method: "POST", body: JSON.stringify(params) }),
+
+  // Export as ordered folder
+  exportSetFolder: (params: { track_ids: number[]; name?: string }) =>
+    fetcher<{
+      export_path: string;
+      tracks_copied: number;
+      tracks: Array<{ position: number; filename: string; title: string }>;
+    }>("/api/export-set-folder", { method: "POST", body: JSON.stringify(params) }),
 };

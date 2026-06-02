@@ -5,7 +5,8 @@ import { api, type Track, type SetTrack, type ArcType, type TransitionScore } fr
 import { TrackTable } from "@/components/track-table";
 import { EnergyArc } from "@/components/energy-arc";
 import { CAMELOT_COLORS, formatDuration } from "@/lib/camelot";
-import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight, Download, ExternalLink, Music, AlertTriangle, Search } from "lucide-react";
+import { SetPlayer } from "@/components/set-player";
+import { Disc3, Wand2, Plus, Trash2, GripVertical, ArrowRight, Download, FolderDown, ExternalLink, Music, AlertTriangle, Search } from "lucide-react";
 
 export default function SetBuilderPage() {
   const [allTracks, setAllTracks] = useState<Track[]>([]);
@@ -24,6 +25,8 @@ export default function SetBuilderPage() {
     time_in_set: string; message: string; suggestion: string;
   }>>([]);
   const [analyzingGaps, setAnalyzingGaps] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportResult, setExportResult] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([api.getTracks(), api.getArcTypes()])
@@ -150,6 +153,24 @@ export default function SetBuilderPage() {
     URL.revokeObjectURL(url);
   }, [setTracks, selectedArc, arcTypes]);
 
+  const handleExportFolder = useCallback(async () => {
+    if (setTracks.length === 0) return;
+    setExporting(true);
+    setExportResult(null);
+    try {
+      const result = await api.exportSetFolder({
+        track_ids: setTracks.map((st) => st.track.id),
+        name: `DJ Set - ${arcTypes.find((a) => a.id === selectedArc)?.name || selectedArc} - ${new Date().toISOString().slice(0, 10)}`,
+      });
+      setExportResult(`${result.tracks_copied} tracks copied to: ${result.export_path}`);
+    } catch (e) {
+      console.error(e);
+      setExportResult("Export failed — is the backend running?");
+    } finally {
+      setExporting(false);
+    }
+  }, [setTracks, selectedArc, arcTypes]);
+
   const totalDurationRaw = setTracks.reduce((sum, t) => sum + t.track.duration, 0);
   const totalDuration = totalDurationRaw;
 
@@ -238,13 +259,23 @@ export default function SetBuilderPage() {
           </button>
 
           {setTracks.length > 0 && (
-            <button
-              onClick={handleExportText}
-              className="flex items-center gap-2 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-sm font-medium text-zinc-200 transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              Export Set
-            </button>
+            <>
+              <button
+                onClick={handleExportText}
+                className="flex items-center gap-2 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-sm font-medium text-zinc-200 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Export .txt
+              </button>
+              <button
+                onClick={handleExportFolder}
+                disabled={exporting}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-700/60 hover:bg-emerald-600/60 disabled:opacity-50 rounded-lg text-sm font-medium text-emerald-200 transition-colors"
+              >
+                <FolderDown className="w-4 h-4" />
+                {exporting ? "Copying..." : "Export Folder"}
+              </button>
+            </>
           )}
         </div>
 
@@ -252,6 +283,12 @@ export default function SetBuilderPage() {
           <p className="text-xs text-zinc-500 mt-2">
             {arcTypes.find((a) => a.id === selectedArc)!.description}
           </p>
+        )}
+
+        {exportResult && (
+          <div className="mt-2 px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-xs text-emerald-300">
+            {exportResult}
+          </div>
         )}
 
         {/* Quick presets */}
@@ -289,6 +326,9 @@ export default function SetBuilderPage() {
           <EnergyArc tracks={setTracks} width={700} height={180} />
         </div>
       )}
+
+      {/* Set Player */}
+      {setTracks.length > 0 && <SetPlayer tracks={setTracks} />}
 
       {/* Set Tracklist */}
       <div className="bg-zinc-900 rounded-xl border border-zinc-800">

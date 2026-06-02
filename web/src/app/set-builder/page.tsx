@@ -41,6 +41,8 @@ export default function SetBuilderPage() {
   }, []);
 
   const genres = [...new Set(allTracks.map((t) => t.genre).filter(Boolean))] as string[];
+  const totalDurationRaw = setTracks.reduce((sum, t) => sum + t.track.duration, 0);
+  const totalDuration = totalDurationRaw;
 
   const handleGenerate = useCallback(async () => {
     setGenerating(true);
@@ -256,9 +258,6 @@ export default function SetBuilderPage() {
       setExporting(false);
     }
   }, [setTracks, selectedArc, arcTypes]);
-
-  const totalDurationRaw = setTracks.reduce((sum, t) => sum + t.track.duration, 0);
-  const totalDuration = totalDurationRaw;
 
   if (loading) {
     return (

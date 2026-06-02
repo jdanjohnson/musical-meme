@@ -265,11 +265,11 @@ def detect_vocals(y: np.ndarray, sr: int) -> tuple[bool, float]:
 def detect_transition_points(y: np.ndarray, sr: int, bpm: float) -> dict:
     """Detect intro/outro cue points for DJ transitions.
 
-    Finds where the track's energy settles in (end of intro) and where it
-    begins to drop off (start of outro). Uses beat-aligned phrase boundaries
-    (every 16 beats) so transitions land on musically natural points.
+    Uses energy envelope with smoothing to find where the track's energy
+    first rises (end of intro) and where it begins its final drop (start
+    of outro). Points are snapped to phrase boundaries (every 16 beats).
 
-    Returns {intro_end_sec, outro_start_sec, phrase_length_sec, beat_times}.
+    Returns {intro_end_sec, outro_start_sec, phrase_length_sec}.
     """
     if bpm <= 0:
         bpm = 120.0
@@ -280,41 +280,81 @@ def detect_transition_points(y: np.ndarray, sr: int, bpm: float) -> dict:
 
     duration = librosa.get_duration(y=y, sr=sr)
 
-    # Compute energy envelope in ~0.5s windows
-    hop = int(sr * 0.5)
+    # Compute energy envelope in ~0.25s windows for better resolution
+    hop = max(1, int(sr * 0.25))
     rms = librosa.feature.rms(y=y, hop_length=hop)[0]
     if len(rms) == 0:
         return {"intro_end_sec": 0, "outro_start_sec": duration, "phrase_length_sec": phrase_dur}
 
-    # Normalize
-    rms_norm = rms / (np.max(rms) + 1e-8)
-    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop)
+    # Smooth the envelope to reduce noise
+    kernel_size = max(3, int(2.0 / 0.25))  # ~2 second smoothing
+    if len(rms) > kernel_size:
+        kernel = np.ones(kernel_size) / kernel_size
+        rms_smooth = np.convolve(rms, kernel, mode="same")
+    else:
+        rms_smooth = rms
 
-    # Threshold: where energy first consistently exceeds 40% of peak = intro end
-    threshold = 0.4
+    rms_norm = rms_smooth / (np.max(rms_smooth) + 1e-8)
+    times = librosa.frames_to_time(np.arange(len(rms_norm)), sr=sr, hop_length=hop)
+
+    # --- Intro detection ---
+    # Find where energy first stays above 30% for at least 2 seconds
+    threshold_intro = 0.3
+    min_sustain_frames = max(1, int(2.0 / 0.25))
     intro_end = 0.0
+    consecutive = 0
     for i, val in enumerate(rms_norm):
-        if val >= threshold:
-            intro_end = times[i]
-            break
+        if val >= threshold_intro:
+            consecutive += 1
+            if consecutive >= min_sustain_frames:
+                intro_end = times[max(0, i - min_sustain_frames + 1)]
+                break
+        else:
+            consecutive = 0
 
-    # Snap to nearest phrase boundary
+    # Snap to phrase boundary
     if phrase_dur > 0:
         intro_end = max(phrase_dur, round(intro_end / phrase_dur) * phrase_dur)
 
-    # Outro: where energy last exceeds 40% of peak
+    # --- Outro detection ---
+    # Walk backwards from the end: find where energy drops below 25% of peak
+    # sustained for at least 2 seconds. The outro starts where the drop begins.
+    threshold_outro = 0.25
     outro_start = duration
+    consecutive = 0
     for i in range(len(rms_norm) - 1, -1, -1):
-        if rms_norm[i] >= threshold:
-            outro_start = times[i]
-            break
+        if rms_norm[i] < threshold_outro:
+            consecutive += 1
+            if consecutive >= min_sustain_frames:
+                # The outro begins where the energy started dropping
+                # Walk forward to find the last high-energy frame before this dip
+                drop_start_idx = min(len(rms_norm) - 1, i + consecutive)
+                outro_start = times[drop_start_idx]
+                break
+        else:
+            consecutive = 0
+
+    # If we didn't find a clear drop, look for where energy derivative goes negative
+    if outro_start >= duration - phrase_dur:
+        # Use the last 25% of the track and find the steepest energy decline
+        last_quarter = max(1, int(len(rms_norm) * 0.75))
+        if last_quarter < len(rms_norm) - 1:
+            diff = np.diff(rms_norm[last_quarter:])
+            if len(diff) > 0:
+                steepest = np.argmin(diff)
+                outro_start = times[last_quarter + steepest]
 
     # Snap to phrase boundary
     if phrase_dur > 0:
         outro_start = min(duration - phrase_dur, round(outro_start / phrase_dur) * phrase_dur)
 
-    # Ensure valid range
+    # Ensure outro is at least 2 phrases from the end and after intro
     outro_start = max(outro_start, intro_end + phrase_dur)
+    outro_start = min(outro_start, duration - phrase_dur)
+
+    # Sanity: outro should leave at least 8 seconds for crossfade
+    if duration - outro_start < 8:
+        outro_start = max(intro_end + phrase_dur, duration - max(16, phrase_dur * 2))
 
     return {
         "intro_end_sec": round(intro_end, 2),

@@ -142,10 +142,14 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
     const curRate = curBpm && targetBpm ? Math.min(Math.max(targetBpm / curBpm, 0.94), 1.06) : 1;
     const nextRate = nextBpm && targetBpm ? Math.min(Math.max(targetBpm / nextBpm, 0.94), 1.06) : 1;
 
-    // Start the next track at its intro point
+    // Start the next track at its intro point (skip silence/build-up)
     const nextAudio = new Audio(audioUrl(nextTrack.id));
     nextAudio.volume = 0;
     nextAudio.playbackRate = nextRate;
+    const introEnd = nextTrack.intro_end_sec || 0;
+    if (introEnd > 0) {
+      nextAudio.currentTime = introEnd;
+    }
     nextAudioRef.current = nextAudio;
     nextAudio.play().catch(() => {});
 
@@ -261,7 +265,7 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
         </h2>
         {crossfading && (
           <span className="text-xs text-purple-400 animate-pulse">
-            Crossfading · BPM matched
+            Crossfading → {tracks[currentIndex + 1]?.track.title || tracks[currentIndex + 1]?.track.filename || "next"} · BPM matched
           </span>
         )}
       </div>
@@ -294,21 +298,53 @@ export function SetPlayer({ tracks }: SetPlayerProps) {
         </div>
       )}
 
-      {/* Progress bar */}
+      {/* Progress bar with cue point markers */}
       <div className="px-4 py-2">
         <div
-          className="h-1.5 bg-zinc-700 rounded-full cursor-pointer group"
+          className="h-2.5 bg-zinc-700 rounded-full cursor-pointer group relative"
           onClick={seek}
         >
+          {/* Playback progress */}
           <div
-            className="h-full bg-purple-500 rounded-full relative group-hover:bg-purple-400 transition-colors"
+            className="h-full bg-purple-500 rounded-full relative group-hover:bg-purple-400 transition-colors z-10"
             style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }}
           >
             <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity" />
           </div>
+
+          {/* Intro end marker (green) */}
+          {duration > 0 && currentTrack?.intro_end_sec > 0 && (
+            <div
+              className="absolute top-0 h-full w-0.5 bg-green-400 z-20"
+              style={{ left: `${(currentTrack.intro_end_sec / duration) * 100}%` }}
+              title={`Intro ends: ${formatTime(currentTrack.intro_end_sec)}`}
+            >
+              <div className="absolute -top-4 left-1/2 -translate-x-1/2 text-[9px] text-green-400 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">
+                IN {formatTime(currentTrack.intro_end_sec)}
+              </div>
+            </div>
+          )}
+
+          {/* Outro start marker (orange) — this is where crossfade begins */}
+          {duration > 0 && currentTrack?.outro_start_sec > 0 && currentTrack.outro_start_sec < duration && (
+            <div
+              className="absolute top-0 h-full w-0.5 bg-orange-400 z-20"
+              style={{ left: `${(currentTrack.outro_start_sec / duration) * 100}%` }}
+              title={`Outro starts: ${formatTime(currentTrack.outro_start_sec)} — crossfade begins here`}
+            >
+              <div className="absolute -top-4 left-1/2 -translate-x-1/2 text-[9px] text-orange-400 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">
+                OUT {formatTime(currentTrack.outro_start_sec)}
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
           <span>{formatTime(currentTime)}</span>
+          {currentTrack?.outro_start_sec > 0 && duration > 0 && (
+            <span className="text-orange-400/60">
+              crossfade at {formatTime(currentTrack.outro_start_sec)}
+            </span>
+          )}
           <span>{formatTime(duration)}</span>
         </div>
       </div>

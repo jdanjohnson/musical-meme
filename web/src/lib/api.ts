@@ -124,6 +124,12 @@ export const api = {
   deleteTrack: (id: number) =>
     fetcher<{ deleted: boolean; id: number }>(`/api/tracks/${id}`, { method: "DELETE" }),
 
+  getDuplicates: () =>
+    fetcher<{ duplicate_groups: Array<{ normalized_name: string; tracks: Array<Track & { is_best: boolean }> }>; total_duplicates: number }>("/api/duplicates"),
+
+  cleanDuplicates: () =>
+    fetcher<{ deleted_count: number; deleted_ids: number[] }>("/api/duplicates/clean", { method: "DELETE" }),
+
   getStats: () => fetcher<LibraryStats>("/api/stats"),
 
   // Theory / Set Planning

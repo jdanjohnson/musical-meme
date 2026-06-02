@@ -1,7 +1,9 @@
 """Music theory engine — Camelot wheel, harmonic compatibility, energy scoring."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 
 # Camelot wheel: 1-12 for position, A=minor, B=major
 # Adjacent keys (same letter ±1, or same number A↔B) are compatible
@@ -372,6 +374,40 @@ def suggest_next_tracks(
     return candidates[:limit]
 
 
+_TRAILING_SUFFIX = re.compile(r"[\s_\-\.]*(?:\(\d+\)|\d+)$")
+
+
+def normalize_track_name(filename: str) -> str:
+    """Strip extension and trailing number suffixes for duplicate detection.
+
+    'hey_1.mp3' -> 'hey', 'song (2).wav' -> 'song', 'track-03.mp3' -> 'track'
+    """
+    stem = Path(filename).stem.lower().strip()
+    return _TRAILING_SUFFIX.sub("", stem).strip()
+
+
+def deduplicate_tracks(tracks: list[dict]) -> list[dict]:
+    """Remove near-duplicate tracks, keeping the one with the longest duration.
+
+    Two tracks are considered duplicates if their filenames normalize to the
+    same string after stripping extensions and trailing number suffixes.
+    """
+    groups: dict[str, list[dict]] = {}
+    for t in tracks:
+        key = normalize_track_name(t.get("filename", ""))
+        if not key:
+            key = str(t.get("id", ""))
+        groups.setdefault(key, []).append(t)
+
+    result = []
+    for group in groups.values():
+        # Keep the track with the longest duration (most complete version)
+        best = max(group, key=lambda t: t.get("duration", 0))
+        result.append(best)
+
+    return result
+
+
 def auto_generate_set(
     all_tracks: list[dict],
     start_track: dict | None = None,
@@ -385,7 +421,7 @@ def auto_generate_set(
     Returns list of (track, transition_score_from_previous).
     First track has None score.
     """
-    pool = all_tracks
+    pool = deduplicate_tracks(all_tracks)
     if genre_filter:
         genre_lower = genre_filter.lower()
         pool = [t for t in pool if (t.get("genre") or "").lower() == genre_lower]

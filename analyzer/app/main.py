@@ -23,6 +23,8 @@ from app.theory import (
     harmonic_relationship,
     camelot_distance,
     analyze_set_gaps,
+    deduplicate_tracks,
+    normalize_track_name,
 )
 from app.soundcloud import (
     set_apify_token,
@@ -333,6 +335,70 @@ async def stream_track_audio(track_id: int):
     media_type = media_types.get(ext, "audio/mpeg")
 
     return FileResponse(file_path, media_type=media_type, filename=os.path.basename(file_path))
+
+
+@app.get("/api/duplicates")
+async def find_duplicates():
+    """Find duplicate tracks based on fuzzy name matching."""
+    db = await get_db()
+    try:
+        all_tracks = await get_all_tracks(db)
+    finally:
+        await db.close()
+
+    groups: Dict[str, List[dict]] = {}
+    for t in all_tracks:
+        key = normalize_track_name(t.get("filename", ""))
+        if not key:
+            continue
+        groups.setdefault(key, []).append(t)
+
+    # Only return groups with more than one track
+    duplicates = []
+    for name, group in groups.items():
+        if len(group) > 1:
+            # Mark which one to keep (longest duration)
+            best = max(group, key=lambda t: t.get("duration", 0))
+            duplicates.append({
+                "normalized_name": name,
+                "tracks": [
+                    {**t, "is_best": t["id"] == best["id"]}
+                    for t in group
+                ],
+            })
+
+    return {"duplicate_groups": duplicates, "total_duplicates": sum(len(g["tracks"]) - 1 for g in duplicates)}
+
+
+@app.delete("/api/duplicates/clean")
+async def clean_duplicates():
+    """Auto-delete duplicate tracks, keeping the longest version of each."""
+    db = await get_db()
+    try:
+        all_tracks = await get_all_tracks(db)
+
+        groups: Dict[str, List[dict]] = {}
+        for t in all_tracks:
+            key = normalize_track_name(t.get("filename", ""))
+            if not key:
+                continue
+            groups.setdefault(key, []).append(t)
+
+        deleted_ids = []
+        for group in groups.values():
+            if len(group) <= 1:
+                continue
+            best = max(group, key=lambda t: t.get("duration", 0))
+            for t in group:
+                if t["id"] != best["id"]:
+                    await db.execute("DELETE FROM tracks WHERE id = ?", (t["id"],))
+                    deleted_ids.append(t["id"])
+
+        await db.commit()
+    finally:
+        await db.close()
+
+    return {"deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
 
 
 @app.get("/api/stats")

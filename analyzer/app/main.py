@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, Dict, List, Optional
 import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,16 +72,16 @@ class ScanStatus(BaseModel):
     processed_files: int
     skipped_files: int
     error_files: int
-    current_file: str | None = None
-    error_message: str | None = None
+    current_file: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class SetGenerateRequest(BaseModel):
-    start_track_id: int | None = None
+    start_track_id: Optional[int] = None
     target_minutes: int = 60
     arc_type: str = "standard"
     bpm_range: float = 8.0
-    genre_filter: str | None = None
+    genre_filter: Optional[str] = None
 
 
 class SuggestRequest(BaseModel):
@@ -89,7 +89,7 @@ class SuggestRequest(BaseModel):
     position_in_set: float = 0.5
     arc_type: str = "standard"
     bpm_range: float = 8.0
-    exclude_ids: list[int] = []
+    exclude_ids: List[int] = []
     limit: int = 20
 
 
@@ -111,14 +111,14 @@ class SCImportRequest(BaseModel):
 
 class SCImportStatus(BaseModel):
     import_id: int
-    label: str | None = None
+    label: Optional[str] = None
     status: str
     total_tracks: int
     processed_tracks: int
     skipped_tracks: int
     error_tracks: int
-    current_track: str | None = None
-    error_message: str | None = None
+    current_track: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 # --- Scan endpoints ---

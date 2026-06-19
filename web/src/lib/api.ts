@@ -38,6 +38,24 @@ export interface Track {
   sample_rate: number;
   channels: number;
   soundcloud_url: string | null;
+  has_vocals: boolean;
+  vocal_confidence: number;
+  intro_end_sec: number;
+  outro_start_sec: number;
+  phrase_length_sec: number;
+  // AI intelligence
+  ai_genre: string | null;
+  ai_genre_confidence: number;
+  mood_primary: string | null;
+  mood_valence: number;
+  mood_arousal: number;
+  mood_tension: number;
+  mood_warmth: number;
+  mood_tags: string | null;
+  audio_embedding: string | null;
+  structure_drops: string | null;
+  structure_breakdowns: string | null;
+  structure_builds: string | null;
 }
 
 export interface TransitionScore {
@@ -116,6 +134,21 @@ export const api = {
 
   getTrack: (id: number) => fetcher<Track>(`/api/tracks/${id}`),
 
+  deleteTrack: (id: number) =>
+    fetcher<{ deleted: boolean; id: number }>(`/api/tracks/${id}`, { method: "DELETE" }),
+
+  getDuplicates: () =>
+    fetcher<{ duplicate_groups: Array<{ normalized_name: string; tracks: Array<Track & { is_best: boolean }> }>; total_duplicates: number }>("/api/duplicates"),
+
+  cleanDuplicates: () =>
+    fetcher<{ deleted_count: number; deleted_ids: number[] }>("/api/duplicates/clean", { method: "DELETE" }),
+
+  reanalyzeAll: () =>
+    fetcher<{ message: string }>("/api/reanalyze", { method: "POST" }),
+
+  reanalyzeStatus: () =>
+    fetcher<{ running: boolean; total: number; processed: number; current: string; errors: number }>("/api/reanalyze/status"),
+
   getStats: () => fetcher<LibraryStats>("/api/stats"),
 
   // Theory / Set Planning
@@ -151,12 +184,19 @@ export const api = {
     arc_type?: string;
     bpm_range?: number;
     genre_filter?: string;
+    vibe?: string;
   }) =>
     fetcher<{
       set: SetTrack[];
       total_tracks: number;
       total_duration_minutes: number;
       arc_type: string;
+      vibe?: {
+        description: string;
+        energy_range: [number, number];
+        bpm_range: [number, number];
+        keywords_matched: string[];
+      };
     }>("/api/generate-set", { method: "POST", body: JSON.stringify(params) }),
 
   getArcTypes: () => fetcher<{ arc_types: ArcType[] }>("/api/arc-types"),
@@ -182,6 +222,27 @@ export const api = {
 
   scImports: () =>
     fetcher<{ imports: SCImportStatus[] }>("/api/soundcloud/imports"),
+
+  // Gap Analysis
+  analyzeGaps: (params: {
+    arc_type?: string;
+    target_minutes?: number;
+    bpm_range?: number;
+  }) =>
+    fetcher<{
+      gaps: Array<{
+        type: string;
+        severity: string;
+        position: number;
+        time_in_set: string;
+        message: string;
+        suggestion: string;
+      }>;
+      total_gaps: number;
+      high_severity: number;
+      set_tracks: number;
+      set_duration_minutes: number;
+    }>("/api/analyze-gaps", { method: "POST", body: JSON.stringify(params) }),
 
   // Export
   exportSet: (params: {
@@ -209,4 +270,12 @@ export const api = {
       total_duration_minutes: number;
       arc_type: string;
     }>("/api/export-set", { method: "POST", body: JSON.stringify(params) }),
+
+  // Export as ordered folder
+  exportSetFolder: (params: { track_ids: number[]; name?: string }) =>
+    fetcher<{
+      export_path: string;
+      tracks_copied: number;
+      tracks: Array<{ position: number; filename: string; title: string }>;
+    }>("/api/export-set-folder", { method: "POST", body: JSON.stringify(params) }),
 };

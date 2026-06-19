@@ -1,21 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { api, type Track } from "@/lib/api";
 import { TrackTable } from "@/components/track-table";
 import { CAMELOT_COLORS, CAMELOT_TO_KEY, formatDuration } from "@/lib/camelot";
-import { Disc3, X } from "lucide-react";
+import { Disc3, Trash2, X, Copy, RefreshCw } from "lucide-react";
 
 export default function LibraryPage() {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
+  const [dupeCount, setDupeCount] = useState(0);
+  const [cleaning, setCleaning] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [reanalyzeProgress, setReanalyzeProgress] = useState("");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
+  const loadTracks = () => {
     api.getTracks()
       .then((res) => setTracks(res.tracks))
       .catch(console.error)
       .finally(() => setLoading(false));
+    api.getDuplicates()
+      .then((res) => setDupeCount(res.total_duplicates))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    loadTracks();
   }, []);
 
   if (loading) {
@@ -28,9 +40,85 @@ export default function LibraryPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Library</h1>
-        <p className="text-zinc-400 text-sm mt-1">{tracks.length} tracks</p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Library</h1>
+          <p className="text-zinc-400 text-sm mt-1">{tracks.length} tracks</p>
+        </div>
+        <div className="flex gap-2">
+          {dupeCount > 0 && (
+            <button
+              onClick={async () => {
+                if (!confirm(`Remove ${dupeCount} duplicate track(s)? The longest version of each will be kept.`)) return;
+                setCleaning(true);
+                try {
+                  await api.cleanDuplicates();
+                  setDupeCount(0);
+                  loadTracks();
+                } catch (e) {
+                  console.error("Failed to clean duplicates", e);
+                } finally {
+                  setCleaning(false);
+                }
+              }}
+              disabled={cleaning}
+              className="flex items-center gap-2 px-3 py-1.5 bg-orange-600/20 text-orange-400 rounded-lg text-sm hover:bg-orange-600/30 transition-colors disabled:opacity-50"
+            >
+              <Copy className="w-4 h-4" />
+              {cleaning ? "Cleaning..." : `Clean ${dupeCount} duplicate${dupeCount > 1 ? "s" : ""}`}
+            </button>
+          )}
+          <button
+            onClick={async () => {
+              if (!confirm("Re-analyze all tracks? This may take a while.")) return;
+              setReanalyzing(true);
+              setReanalyzeProgress("Starting...");
+              try {
+                await api.reanalyzeAll();
+                // Poll for progress
+                pollRef.current = setInterval(async () => {
+                  try {
+                    const s = await api.reanalyzeStatus();
+                    if (s.running) {
+                      setReanalyzeProgress(`${s.processed}/${s.total} — ${s.current}`);
+                    } else {
+                      setReanalyzeProgress("");
+                      setReanalyzing(false);
+                      if (pollRef.current) clearInterval(pollRef.current);
+                      loadTracks();
+                    }
+                  } catch { /* ignore */ }
+                }, 2000);
+              } catch (e) {
+                console.error("Failed to start re-analysis", e);
+                setReanalyzing(false);
+              }
+            }}
+            disabled={reanalyzing}
+            className="flex items-center gap-2 px-3 py-1.5 bg-purple-600/20 text-purple-400 rounded-lg text-sm hover:bg-purple-600/30 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${reanalyzing ? "animate-spin" : ""}`} />
+            {reanalyzing ? reanalyzeProgress : "Re-analyze All"}
+          </button>
+          <button
+            onClick={async () => {
+              if (!confirm("Clear entire library? This removes ALL tracks and resets the skip list. This cannot be undone.")) return;
+              try {
+                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/tracks/clear-all`, { method: "DELETE" });
+                const data = await res.json();
+                setTracks([]);
+                setSelectedTrack(null);
+                alert(`Library cleared — ${data.tracks_removed} tracks removed.`);
+              } catch (e) {
+                console.error("Failed to clear library", e);
+              }
+            }}
+            className="flex items-center gap-2 px-3 py-1.5 bg-red-600/20 text-red-400 rounded-lg text-sm hover:bg-red-600/30 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+            Clear Library
+          </button>
+        </div>
       </div>
 
       <div className="flex gap-6">
@@ -39,6 +127,15 @@ export default function LibraryPage() {
             tracks={tracks}
             onTrackSelect={setSelectedTrack}
             selectedTrackId={selectedTrack?.id}
+            onDeleteTrack={async (id) => {
+              try {
+                await api.deleteTrack(id);
+                setTracks((prev) => prev.filter((t) => t.id !== id));
+                if (selectedTrack?.id === id) setSelectedTrack(null);
+              } catch (e) {
+                console.error("Failed to delete track", e);
+              }
+            }}
           />
         </div>
 

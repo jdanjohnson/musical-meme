@@ -1,4 +1,5 @@
 """SQLite database for caching audio analysis results."""
+from __future__ import annotations
 
 import aiosqlite
 import json
@@ -126,6 +127,13 @@ async def init_db() -> None:
                 completed_at TEXT,
                 error_message TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS deleted_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT UNIQUE NOT NULL,
+                filename TEXT,
+                deleted_at TEXT NOT NULL
+            );
         """)
         # Migrations — add columns if missing
         try:
@@ -133,6 +141,39 @@ async def init_db() -> None:
         except Exception:
             await db.execute("ALTER TABLE tracks ADD COLUMN soundcloud_url TEXT")
             await db.execute("ALTER TABLE tracks ADD COLUMN soundcloud_tags TEXT")
+            await db.commit()
+
+        try:
+            await db.execute("SELECT has_vocals FROM tracks LIMIT 1")
+        except Exception:
+            await db.execute("ALTER TABLE tracks ADD COLUMN has_vocals INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN vocal_confidence REAL DEFAULT 0")
+            await db.commit()
+
+        try:
+            await db.execute("SELECT intro_end_sec FROM tracks LIMIT 1")
+        except Exception:
+            await db.execute("ALTER TABLE tracks ADD COLUMN intro_end_sec REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN outro_start_sec REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN phrase_length_sec REAL DEFAULT 0")
+            await db.commit()
+
+        # AI intelligence columns
+        try:
+            await db.execute("SELECT ai_genre FROM tracks LIMIT 1")
+        except Exception:
+            await db.execute("ALTER TABLE tracks ADD COLUMN ai_genre TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN ai_genre_confidence REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_primary TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_valence REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_arousal REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_tension REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_warmth REAL DEFAULT 0")
+            await db.execute("ALTER TABLE tracks ADD COLUMN mood_tags TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN audio_embedding TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN structure_drops TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN structure_breakdowns TEXT")
+            await db.execute("ALTER TABLE tracks ADD COLUMN structure_builds TEXT")
             await db.commit()
 
         await db.commit()
@@ -183,3 +224,20 @@ async def get_analyzed_paths(db: aiosqlite.Connection) -> dict[str, str]:
     cursor = await db.execute("SELECT file_path, file_hash FROM tracks")
     rows = await cursor.fetchall()
     return {row["file_path"]: row["file_hash"] for row in rows}
+
+
+async def add_to_skip_list(db: aiosqlite.Connection, file_path: str, filename: str) -> None:
+    """Record a deleted track so it won't be re-analyzed on future scans."""
+    from datetime import datetime, timezone
+    await db.execute(
+        "INSERT OR IGNORE INTO deleted_tracks (file_path, filename, deleted_at) VALUES (?, ?, ?)",
+        (file_path, filename, datetime.now(timezone.utc).isoformat()),
+    )
+    await db.commit()
+
+
+async def get_skip_list(db: aiosqlite.Connection) -> set[str]:
+    """Return set of file paths that should be skipped during scans."""
+    cursor = await db.execute("SELECT file_path FROM deleted_tracks")
+    rows = await cursor.fetchall()
+    return {row["file_path"] for row in rows}

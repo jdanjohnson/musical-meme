@@ -1,17 +1,20 @@
 """FastAPI backend — serves library data and runs analysis jobs."""
+from __future__ import annotations
 
 import asyncio
+import os
+from typing import Any, Dict, List, Optional
 import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.db import init_db, get_db, upsert_track, get_all_tracks, get_track_by_id, get_tracks_by_ids, get_analyzed_paths
+from app.db import init_db, get_db, upsert_track, get_all_tracks, get_track_by_id, get_tracks_by_ids, get_analyzed_paths, add_to_skip_list, get_skip_list
 from app.audio import scan_folder, analyze_track, file_hash
 from app.theory import (
     score_transition,
@@ -19,6 +22,11 @@ from app.theory import (
     auto_generate_set,
     harmonic_relationship,
     camelot_distance,
+    analyze_set_gaps,
+    deduplicate_tracks,
+    normalize_track_name,
+    parse_vibe,
+    vibe_generate_set,
 )
 from app.soundcloud import (
     set_apify_token,
@@ -28,6 +36,8 @@ from app.soundcloud import (
     download_track_ytdlp,
     sc_track_hash,
     parse_sc_track,
+    discover_playlist_tracks,
+    get_track_metadata,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -68,16 +78,17 @@ class ScanStatus(BaseModel):
     processed_files: int
     skipped_files: int
     error_files: int
-    current_file: str | None = None
-    error_message: str | None = None
+    current_file: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class SetGenerateRequest(BaseModel):
-    start_track_id: int | None = None
+    start_track_id: Optional[int] = None
     target_minutes: int = 60
     arc_type: str = "standard"
     bpm_range: float = 8.0
-    genre_filter: str | None = None
+    genre_filter: Optional[str] = None
+    vibe: Optional[str] = None
 
 
 class SuggestRequest(BaseModel):
@@ -85,7 +96,7 @@ class SuggestRequest(BaseModel):
     position_in_set: float = 0.5
     arc_type: str = "standard"
     bpm_range: float = 8.0
-    exclude_ids: list[int] = []
+    exclude_ids: List[int] = []
     limit: int = 20
 
 
@@ -107,14 +118,14 @@ class SCImportRequest(BaseModel):
 
 class SCImportStatus(BaseModel):
     import_id: int
-    label: str | None = None
+    label: Optional[str] = None
     status: str
     total_tracks: int
     processed_tracks: int
     skipped_tracks: int
     error_tracks: int
-    current_track: str | None = None
-    error_message: str | None = None
+    current_track: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 # --- Scan endpoints ---
@@ -195,15 +206,22 @@ async def run_scan(job_id: int, folder_path: str) -> None:
         job["status"] = "analyzing"
         logger.info("Found %d audio files in %s", len(files), folder_path)
 
-        # Get already-analyzed files
+        # Get already-analyzed files and skip list
         db = await get_db()
         try:
             analyzed = await get_analyzed_paths(db)
+            skip_paths = await get_skip_list(db)
         finally:
             await db.close()
 
         for filepath in files:
             try:
+                # Skip deleted tracks
+                if filepath in skip_paths:
+                    job["skipped_files"] += 1
+                    job["processed_files"] += 1
+                    continue
+
                 # Check if already analyzed with same hash
                 current_hash = file_hash(filepath)
                 if filepath in analyzed and analyzed[filepath] == current_hash:
@@ -264,6 +282,70 @@ async def run_scan(job_id: int, folder_path: str) -> None:
         await db.close()
 
 
+# --- Re-analyze ---
+
+reanalyze_status: Dict[str, Any] = {"running": False, "total": 0, "processed": 0, "current": "", "errors": 0}
+
+
+async def run_reanalyze() -> None:
+    """Background task: re-analyze all tracks in the library."""
+    global reanalyze_status
+    reanalyze_status["running"] = True
+    reanalyze_status["errors"] = 0
+
+    db = await get_db()
+    try:
+        tracks = await get_all_tracks(db)
+    finally:
+        await db.close()
+
+    reanalyze_status["total"] = len(tracks)
+    reanalyze_status["processed"] = 0
+
+    for track in tracks:
+        file_path = track.get("file_path", "")
+        folder = track.get("folder", "")
+        try:
+            if not file_path or not os.path.isfile(file_path):
+                reanalyze_status["processed"] += 1
+                continue
+
+            reanalyze_status["current"] = track.get("filename", "")
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, analyze_track, file_path, folder)
+
+            db = await get_db()
+            try:
+                await upsert_track(db, result.to_dict())
+            finally:
+                await db.close()
+
+        except Exception as e:
+            logger.error("Re-analyze error for %s: %s", file_path, e)
+            reanalyze_status["errors"] += 1
+
+        reanalyze_status["processed"] += 1
+
+    reanalyze_status["running"] = False
+    reanalyze_status["current"] = ""
+
+
+@app.post("/api/reanalyze")
+async def reanalyze_all(background_tasks: BackgroundTasks):
+    """Re-analyze all tracks in the library with latest analysis logic."""
+    if reanalyze_status["running"]:
+        raise HTTPException(status_code=409, detail="Re-analysis already in progress")
+    background_tasks.add_task(run_reanalyze)
+    return {"message": "Re-analysis started"}
+
+
+@app.get("/api/reanalyze/status")
+async def reanalyze_progress():
+    """Check re-analysis progress."""
+    return reanalyze_status
+
+
 # --- Library endpoints ---
 
 
@@ -288,6 +370,129 @@ async def get_track(track_id: int):
         return track
     finally:
         await db.close()
+
+
+@app.delete("/api/tracks/{track_id}")
+async def delete_track(track_id: int):
+    """Delete a track from the library and add to skip list."""
+    db = await get_db()
+    try:
+        track = await get_track_by_id(db, track_id)
+        if not track:
+            raise HTTPException(status_code=404, detail="Track not found")
+        # Add to skip list so future scans don't re-import it
+        await add_to_skip_list(db, track.get("file_path", ""), track.get("filename", ""))
+        await db.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
+        await db.commit()
+        return {"deleted": True, "id": track_id}
+    finally:
+        await db.close()
+
+
+@app.delete("/api/tracks/clear-all")
+async def clear_all_tracks():
+    """Delete ALL tracks from the library. Does NOT add them to skip list."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT COUNT(*) FROM tracks")
+        row = await cursor.fetchone()
+        count = row[0] if row else 0
+        await db.execute("DELETE FROM tracks")
+        # Also clear the skip list so re-scans work fresh
+        await db.execute("DELETE FROM deleted_tracks")
+        await db.commit()
+        return {"cleared": True, "tracks_removed": count}
+    finally:
+        await db.close()
+
+
+@app.get("/api/tracks/{track_id}/audio")
+async def stream_track_audio(track_id: int):
+    """Serve audio file for in-browser playback."""
+    db = await get_db()
+    try:
+        track = await get_track_by_id(db, track_id)
+    finally:
+        await db.close()
+
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    file_path = track.get("file_path", "")
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Audio file not found on disk")
+
+    ext = os.path.splitext(file_path)[1].lower()
+    media_types = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+                   ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".opus": "audio/opus"}
+    media_type = media_types.get(ext, "audio/mpeg")
+
+    return FileResponse(file_path, media_type=media_type, filename=os.path.basename(file_path))
+
+
+@app.get("/api/duplicates")
+async def find_duplicates():
+    """Find duplicate tracks based on fuzzy name matching."""
+    db = await get_db()
+    try:
+        all_tracks = await get_all_tracks(db)
+    finally:
+        await db.close()
+
+    groups: Dict[str, List[dict]] = {}
+    for t in all_tracks:
+        key = normalize_track_name(t.get("filename", ""))
+        if not key:
+            continue
+        groups.setdefault(key, []).append(t)
+
+    # Only return groups with more than one track
+    duplicates = []
+    for name, group in groups.items():
+        if len(group) > 1:
+            # Mark which one to keep (longest duration)
+            best = max(group, key=lambda t: t.get("duration", 0))
+            duplicates.append({
+                "normalized_name": name,
+                "tracks": [
+                    {**t, "is_best": t["id"] == best["id"]}
+                    for t in group
+                ],
+            })
+
+    return {"duplicate_groups": duplicates, "total_duplicates": sum(len(g["tracks"]) - 1 for g in duplicates)}
+
+
+@app.delete("/api/duplicates/clean")
+async def clean_duplicates():
+    """Auto-delete duplicate tracks, keeping the longest version of each."""
+    db = await get_db()
+    try:
+        all_tracks = await get_all_tracks(db)
+
+        groups: Dict[str, List[dict]] = {}
+        for t in all_tracks:
+            key = normalize_track_name(t.get("filename", ""))
+            if not key:
+                continue
+            groups.setdefault(key, []).append(t)
+
+        deleted_ids = []
+        for group in groups.values():
+            if len(group) <= 1:
+                continue
+            best = max(group, key=lambda t: t.get("duration", 0))
+            for t in group:
+                if t["id"] != best["id"]:
+                    await add_to_skip_list(db, t.get("file_path", ""), t.get("filename", ""))
+                    await db.execute("DELETE FROM tracks WHERE id = ?", (t["id"],))
+                    deleted_ids.append(t["id"])
+
+        await db.commit()
+    finally:
+        await db.close()
+
+    return {"deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
 
 
 @app.get("/api/stats")
@@ -438,14 +643,25 @@ async def generate_set(req: SetGenerateRequest):
     if not all_tracks:
         raise HTTPException(status_code=400, detail="No tracks in library. Run a scan first.")
 
-    result = auto_generate_set(
-        all_tracks,
-        start_track,
-        req.target_minutes,
-        req.arc_type,
-        req.bpm_range,
-        req.genre_filter,
-    )
+    # Use vibe-based generation if a vibe description is provided
+    if req.vibe and req.vibe.strip():
+        result = vibe_generate_set(
+            all_tracks,
+            req.vibe,
+            req.target_minutes,
+            req.bpm_range,
+        )
+        vibe_info = parse_vibe(req.vibe)
+    else:
+        result = auto_generate_set(
+            all_tracks,
+            start_track,
+            req.target_minutes,
+            req.arc_type,
+            req.bpm_range,
+            req.genre_filter,
+        )
+        vibe_info = None
 
     tracks_out = []
     total_duration = 0
@@ -466,12 +682,20 @@ async def generate_set(req: SetGenerateRequest):
             } if score else None,
         })
 
-    return {
+    resp = {
         "set": tracks_out,
         "total_tracks": len(tracks_out),
         "total_duration_minutes": round(total_duration / 60, 1),
         "arc_type": req.arc_type,
     }
+    if vibe_info:
+        resp["vibe"] = {
+            "description": req.vibe,
+            "energy_range": vibe_info["energy_range"],
+            "bpm_range": vibe_info["bpm_range"],
+            "keywords_matched": vibe_info["keywords_matched"],
+        }
+    return resp
 
 
 @app.get("/api/arc-types")
@@ -587,6 +811,93 @@ async def export_set(params: dict[str, Any]):
             (st["track"].get("duration") or 0) / 60 for st in set_tracks
         ),
         "arc_type": arc,
+    }
+
+
+@app.post("/api/export-set-folder")
+async def export_set_folder(params: dict[str, Any]):
+    """Copy set tracks into a numbered folder ready for Rekordbox import."""
+    import shutil
+
+    track_ids = params.get("track_ids", [])
+    export_name = params.get("name", "DJ Set")
+
+    if not track_ids:
+        raise HTTPException(status_code=400, detail="No track IDs provided")
+
+    db = await get_db()
+    try:
+        tracks = await get_tracks_by_ids(db, track_ids)
+    finally:
+        await db.close()
+
+    # Build ordered lookup
+    id_to_track = {t["id"]: t for t in tracks}
+    ordered = [id_to_track[tid] for tid in track_ids if tid in id_to_track]
+
+    if not ordered:
+        raise HTTPException(status_code=400, detail="No valid tracks found")
+
+    # Create export folder on desktop or home
+    home = os.path.expanduser("~")
+    export_dir = os.path.join(home, "DJ Sets", export_name)
+    os.makedirs(export_dir, exist_ok=True)
+
+    copied = []
+    for i, track in enumerate(ordered, 1):
+        src = track.get("file_path", "")
+        if not src or not os.path.isfile(src):
+            continue
+
+        ext = os.path.splitext(src)[1]
+        title = track.get("title") or track.get("filename", "Unknown")
+        # Sanitize filename
+        safe_title = "".join(c for c in title if c.isalnum() or c in " -_().").strip()
+        bpm = track.get("bpm", 0)
+        key = track.get("camelot", "")
+        dest_name = f"{i:02d} - {safe_title} ({bpm:.0f} BPM, {key}){ext}"
+        dest = os.path.join(export_dir, dest_name)
+
+        shutil.copy2(src, dest)
+        copied.append({"position": i, "filename": dest_name, "title": title})
+
+    return {
+        "export_path": export_dir,
+        "tracks_copied": len(copied),
+        "tracks": copied,
+    }
+
+
+@app.post("/api/analyze-gaps")
+async def analyze_gaps(params: dict[str, Any]):
+    """Analyze a generated set for energy, harmonic, and BPM gaps.
+
+    Returns suggestions for what tracks to find to fill holes in the vibe.
+    """
+    db = await get_db()
+    try:
+        tracks = await get_all_tracks(db)
+    finally:
+        await db.close()
+
+    if not tracks:
+        raise HTTPException(status_code=400, detail="No tracks in library")
+
+    arc = params.get("arc_type", "standard")
+    target = params.get("target_minutes", 60)
+    bpm_range = params.get("bpm_range", 8)
+
+    set_result = auto_generate_set(tracks, None, target, arc, bpm_range)
+    set_track_dicts = [t for t, _ in set_result]
+
+    gaps = analyze_set_gaps(set_track_dicts, arc, target)
+
+    return {
+        "gaps": gaps,
+        "total_gaps": len(gaps),
+        "high_severity": len([g for g in gaps if g["severity"] == "high"]),
+        "set_tracks": len(set_track_dicts),
+        "set_duration_minutes": sum(t.get("duration", 300) for t in set_track_dicts) / 60,
     }
 
 
@@ -736,31 +1047,31 @@ async def list_sc_imports():
 
 
 async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> None:
-    """Background task: scrape SC URL via Apify, download streams, analyze each track."""
+    """Background task: discover tracks via yt-dlp, download, analyze each."""
     job = active_sc_imports[import_id]
     job["status"] = "scraping"
 
     try:
-        # Run Apify scrape in thread pool (it's synchronous/blocking)
         loop = asyncio.get_event_loop()
-        sc_tracks = await loop.run_in_executor(
-            None, scrape_soundcloud_url, [soundcloud_url], max_items
-        )
 
-        job["total_tracks"] = len(sc_tracks)
+        # Step 1: Discover all tracks in playlist via yt-dlp (handles SC pagination)
+        discovered = await loop.run_in_executor(None, discover_playlist_tracks, soundcloud_url)
+
+        job["total_tracks"] = len(discovered)
         job["status"] = "analyzing"
-        logger.info("SC import %d: Apify found %d tracks from %s", import_id, len(sc_tracks), soundcloud_url)
+        logger.info("SC import %d: yt-dlp discovered %d tracks from %s", import_id, len(discovered), soundcloud_url)
 
-        # Check which SC tracks are already in DB
+        # Check which SC tracks are already in DB + skip list
         db = await get_db()
         try:
             analyzed = await get_analyzed_paths(db)
+            skip_paths = await get_skip_list(db)
         finally:
             await db.close()
 
-        for sc_item in sc_tracks:
-            meta = parse_sc_track(sc_item)
-            track_id = meta["track_id"]
+        for disc in discovered:
+            track_url = disc["url"]
+            track_id = disc["track_id"]
             if not track_id:
                 job["error_tracks"] += 1
                 job["processed_tracks"] += 1
@@ -769,29 +1080,47 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
             fake_path = f"soundcloud://{track_id}"
             expected_hash = sc_track_hash(track_id)
 
+            # Skip if user previously deleted this track
+            if fake_path in skip_paths:
+                job["skipped_tracks"] += 1
+                job["processed_tracks"] += 1
+                continue
+
             # Skip if already analyzed
             if fake_path in analyzed and analyzed[fake_path] == expected_hash:
                 job["skipped_tracks"] += 1
                 job["processed_tracks"] += 1
                 continue
 
-            job["current_track"] = meta.get("title", f"Track {track_id}")
+            job["current_track"] = disc.get("title") or f"Track {track_id}"
 
             try:
-                # Download via yt-dlp using the track's SC URL
-                track_url = meta.get("url", "")
+                # Step 2: Get metadata via yt-dlp (title, artist, genre, tags)
+                meta = await loop.run_in_executor(None, get_track_metadata, track_url)
+                if not meta:
+                    meta = {"track_id": track_id, "url": track_url, "title": disc.get("title", "")}
+
+                # Use the resolved URL if available
+                resolved_url = meta.get("url") or track_url
+                resolved_id = meta.get("track_id") or track_id
+
+                # Update job display with real title
+                if meta.get("title"):
+                    job["current_track"] = meta["title"]
+
+                # Step 3: Download audio via yt-dlp
                 local_path = await loop.run_in_executor(
-                    None, download_track_ytdlp, track_url, track_id, meta.get("title", "")
+                    None, download_track_ytdlp, resolved_url, resolved_id, meta.get("title", "")
                 )
                 if not local_path:
                     job["skipped_tracks"] += 1
                     job["processed_tracks"] += 1
                     continue
 
-                # Analyze in thread pool
+                # Step 4: Analyze with librosa
                 result = await loop.run_in_executor(None, analyze_track, local_path, None)
 
-                # Override with SC metadata + use fake path for dedup
+                # Override with SC metadata
                 track_data = result.to_dict()
                 track_data["file_path"] = fake_path
                 track_data["file_hash"] = expected_hash
@@ -800,7 +1129,7 @@ async def run_sc_import(import_id: int, soundcloud_url: str, max_items: int) -> 
                 track_data["genre"] = meta.get("genre") or track_data.get("genre") or "SoundCloud"
                 track_data["folder"] = "SoundCloud"
                 track_data["filename"] = f"{meta.get('title', f'sc_{track_id}')}.mp3"
-                track_data["soundcloud_url"] = meta.get("url", "")
+                track_data["soundcloud_url"] = resolved_url
                 if meta.get("tags"):
                     track_data["soundcloud_tags"] = json.dumps(meta["tags"])
 

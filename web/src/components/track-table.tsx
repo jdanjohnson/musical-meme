@@ -3,7 +3,7 @@
 import { useState, useMemo } from "react";
 import type { Track, TransitionScore } from "@/lib/api";
 import { CAMELOT_COLORS, formatDuration } from "@/lib/camelot";
-import { ChevronUp, ChevronDown, Music2 } from "lucide-react";
+import { ChevronUp, ChevronDown, Music2, Trash2 } from "lucide-react";
 
 interface TrackTableProps {
   tracks: Track[];
@@ -11,12 +11,13 @@ interface TrackTableProps {
   selectedTrackId?: number | null;
   scores?: Map<number, TransitionScore>;
   compact?: boolean;
+  onDeleteTrack?: (id: number) => void;
 }
 
 type SortKey = "filename" | "bpm" | "camelot" | "energy_level" | "genre" | "duration" | "key";
 type SortDir = "asc" | "desc";
 
-export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, compact }: TrackTableProps) {
+export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, compact, onDeleteTrack }: TrackTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("filename");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [filter, setFilter] = useState("");
@@ -79,6 +80,7 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                   <span className="flex items-center gap-1">Genre <SortIcon col="genre" /></span>
                 </th>
               )}
+              {!compact && <th className="text-center px-3 py-2">Mood</th>}
               <th className="text-center px-3 py-2 cursor-pointer hover:text-purple-300" onClick={() => handleSort("bpm")}>
                 <span className="flex items-center gap-1 justify-center">BPM <SortIcon col="bpm" /></span>
               </th>
@@ -92,6 +94,7 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                 <span className="flex items-center gap-1 justify-end">Duration <SortIcon col="duration" /></span>
               </th>
               {scores && <th className="text-center px-3 py-2">Score</th>}
+              {onDeleteTrack && <th className="w-8 px-2 py-2" />}
             </tr>
           </thead>
           <tbody>
@@ -120,7 +123,22 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                     )}
                   </td>
                   {!compact && (
-                    <td className="px-3 py-2 text-zinc-400 text-xs">{track.genre || "—"}</td>
+                    <td className="px-3 py-2 text-zinc-400 text-xs">
+                      {track.ai_genre ? (
+                        <span title={`Folder: ${track.genre || "—"} | Confidence: ${((track.ai_genre_confidence || 0) * 100).toFixed(0)}%`}>
+                          {track.ai_genre}
+                        </span>
+                      ) : (track.genre || "—")}
+                    </td>
+                  )}
+                  {!compact && (
+                    <td className="px-3 py-2 text-center">
+                      {track.mood_primary ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-indigo-500/20 text-indigo-300" title={`V:${(track.mood_valence||0).toFixed(2)} A:${(track.mood_arousal||0).toFixed(2)} T:${(track.mood_tension||0).toFixed(2)}`}>
+                          {track.mood_primary}
+                        </span>
+                      ) : "—"}
+                    </td>
                   )}
                   <td className="px-3 py-2 text-center font-mono text-xs">{track.bpm?.toFixed(1)}</td>
                   <td className="px-3 py-2 text-center">
@@ -149,6 +167,22 @@ export function TrackTable({ tracks, onTrackSelect, selectedTrackId, scores, com
                       ) : (
                         "—"
                       )}
+                    </td>
+                  )}
+                  {onDeleteTrack && (
+                    <td className="px-2 py-2 text-center">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm("Delete this track from the library?")) {
+                            onDeleteTrack(track.id);
+                          }
+                        }}
+                        className="text-zinc-600 hover:text-red-400 transition-colors"
+                        title="Delete track"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </td>
                   )}
                 </tr>

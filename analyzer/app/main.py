@@ -135,8 +135,19 @@ class SCImportStatus(BaseModel):
 async def start_scan(req: ScanRequest, background_tasks: BackgroundTasks):
     """Start scanning and analyzing a music folder."""
     import os
+    folder = req.folder_path.strip()
+    # Auto-expand ~ and common shortcuts
+    folder = os.path.expanduser(folder)
+    # If path doesn't start with /, try common macOS prefixes
+    if not folder.startswith("/"):
+        for prefix in ["/Users/", "/home/"]:
+            candidate = prefix + folder
+            if os.path.isdir(candidate):
+                folder = candidate
+                break
+    req.folder_path = folder
     if not os.path.isdir(req.folder_path):
-        raise HTTPException(status_code=400, detail=f"Folder not found: {req.folder_path}")
+        raise HTTPException(status_code=400, detail=f"Folder not found: {req.folder_path}. Use full path like /Users/yourname/Downloads/FolderName")
 
     db = await get_db()
     try:

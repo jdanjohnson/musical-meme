@@ -367,6 +367,9 @@ async def list_tracks():
     try:
         tracks = await get_all_tracks(db)
         return {"tracks": tracks, "total": len(tracks)}
+    except Exception as e:
+        logger.exception("Error listing tracks")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         await db.close()
 

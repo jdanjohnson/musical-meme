@@ -135,47 +135,33 @@ async def init_db() -> None:
                 deleted_at TEXT NOT NULL
             );
         """)
-        # Migrations — add columns if missing
-        try:
-            await db.execute("SELECT soundcloud_url FROM tracks LIMIT 1")
-        except Exception:
-            await db.execute("ALTER TABLE tracks ADD COLUMN soundcloud_url TEXT")
-            await db.execute("ALTER TABLE tracks ADD COLUMN soundcloud_tags TEXT")
-            await db.commit()
-
-        try:
-            await db.execute("SELECT has_vocals FROM tracks LIMIT 1")
-        except Exception:
-            await db.execute("ALTER TABLE tracks ADD COLUMN has_vocals INTEGER DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN vocal_confidence REAL DEFAULT 0")
-            await db.commit()
-
-        try:
-            await db.execute("SELECT intro_end_sec FROM tracks LIMIT 1")
-        except Exception:
-            await db.execute("ALTER TABLE tracks ADD COLUMN intro_end_sec REAL DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN outro_start_sec REAL DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN phrase_length_sec REAL DEFAULT 0")
-            await db.commit()
-
-        # AI intelligence columns
-        try:
-            await db.execute("SELECT ai_genre FROM tracks LIMIT 1")
-        except Exception:
-            await db.execute("ALTER TABLE tracks ADD COLUMN ai_genre TEXT")
-            await db.execute("ALTER TABLE tracks ADD COLUMN ai_genre_confidence REAL DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN mood_primary TEXT")
-            await db.execute("ALTER TABLE tracks ADD COLUMN mood_valence REAL DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN mood_arousal REAL DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN mood_tension REAL DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN mood_warmth REAL DEFAULT 0")
-            await db.execute("ALTER TABLE tracks ADD COLUMN mood_tags TEXT")
-            await db.execute("ALTER TABLE tracks ADD COLUMN audio_embedding TEXT")
-            await db.execute("ALTER TABLE tracks ADD COLUMN structure_drops TEXT")
-            await db.execute("ALTER TABLE tracks ADD COLUMN structure_breakdowns TEXT")
-            await db.execute("ALTER TABLE tracks ADD COLUMN structure_builds TEXT")
-            await db.commit()
-
+        # Migrations — add columns if missing (each individually for robustness)
+        migration_columns = [
+            ("soundcloud_url", "TEXT"),
+            ("soundcloud_tags", "TEXT"),
+            ("has_vocals", "INTEGER DEFAULT 0"),
+            ("vocal_confidence", "REAL DEFAULT 0"),
+            ("intro_end_sec", "REAL DEFAULT 0"),
+            ("outro_start_sec", "REAL DEFAULT 0"),
+            ("phrase_length_sec", "REAL DEFAULT 0"),
+            ("ai_genre", "TEXT"),
+            ("ai_genre_confidence", "REAL DEFAULT 0"),
+            ("mood_primary", "TEXT"),
+            ("mood_valence", "REAL DEFAULT 0"),
+            ("mood_arousal", "REAL DEFAULT 0"),
+            ("mood_tension", "REAL DEFAULT 0"),
+            ("mood_warmth", "REAL DEFAULT 0"),
+            ("mood_tags", "TEXT"),
+            ("audio_embedding", "TEXT"),
+            ("structure_drops", "TEXT"),
+            ("structure_breakdowns", "TEXT"),
+            ("structure_builds", "TEXT"),
+        ]
+        for col_name, col_type in migration_columns:
+            try:
+                await db.execute(f"SELECT {col_name} FROM tracks LIMIT 1")
+            except Exception:
+                await db.execute(f"ALTER TABLE tracks ADD COLUMN {col_name} {col_type}")
         await db.commit()
     finally:
         await db.close()
